@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.swp
+*.env
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+
+# Waveform debug binaries
+waveform_debug_*.bin
+
+# Data files
+*.csv
+*.json
+
+# Jupyter Notebooks
+*.ipynb
+
+# Other
+*.log
