@@ -1,15 +1,16 @@
-# OWON SDS Oscilloscope Control
+# OWON HDS / SDS Oscilloscope Control
 
-This project provides a Python-based GUI for OWON SDS series oscilloscopes, enabling SCPI command set via LAN or USB. It features commands for instrument control, waveform acquisition, measurement, and data export.
+This project provides a Python-based GUI for OWON HDS200/HDS300 and SDS series oscilloscopes, with SCPI control over LAN or USB. It includes a modern front panel for instrument control, waveform acquisition, measurement, and export.
 
-![OWON SDS Oscilloscope Control GUI](doc/screen.jpg)
+![OWON HDS Oscilloscope Control GUI](doc/screen.jpg)
 
 ## Features
-- Connect to OWON SDS oscilloscopes via LAN or USB
+- Connect to OWON HDS200/HDS300 or SDS oscilloscopes via LAN or USB
 - SCPI command support for instrument configuration
-- Download and parse waveform data (binary protocol)
+- Download and parse waveform data (screen and deep memory)
 - Waveform plotting with matplotlib
 - Query and display measurements (frequency, voltage, timing, etc.)
+- USB auto-detect for OWON serial devices (VID/PID 5345:1234)
 - Save waveform data as CSV or JSON
 - Auto-refresh and continuous monitoring (SLOW)
 - Channel controls: display, scale, coupling, probe, vertical offset

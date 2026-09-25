@@ -23,3 +23,7 @@ waveform_debug_*.bin
 
 # Other
 *.log
+
+*.bak*
+*.pyc
+__pycache__/

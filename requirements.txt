@@ -1,0 +1,6 @@
+numpy
+matplotlib
+pyserial
+Pillow
+pyusb
+libusb-package
