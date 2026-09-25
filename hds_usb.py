@@ -95,6 +95,8 @@ class HdsHidTransport:
         self._ep_out = None
         self._buffer = bytearray()
         self._lock = threading.RLock()
+        self._failures = 0
+        self.clear_halt_on_error = True
 
     # --------------------------------------------------------------- opening
     def open(self) -> bool:
@@ -148,6 +150,8 @@ class HdsHidTransport:
             self.description = "%04x:%04x" % (device.idVendor, device.idProduct)
         self._buffer.clear()
         self.is_open = True
+        self._failures = 0
+        self.recover()  # clear a halt an earlier session may have left
         return True
 
     # ------------------------------------------------------ pyserial surface
@@ -246,6 +250,32 @@ class HdsHidTransport:
         return False
 
     # -------------------------------------------------------------- internals
+    def _clear_halt(self, endpoint_address) -> bool:
+        """CLEAR_FEATURE(HALT) on one endpoint.
+
+        The scope stalls a read whose size it rejects, and a halted pipe keeps
+        timing out until the host clears it -- a state that survives even a
+        fresh process, so a single bad read would otherwise need a replug.
+        """
+        if self._device is None:
+            return False
+        try:
+            self._device.clear_halt(endpoint_address)
+            return True
+        except Exception as exc:
+            self.last_error = "clear_halt 0x%02x: %s" % (endpoint_address, exc)
+            return False
+
+    def recover(self) -> bool:
+        """Clear the halts on both HID endpoints.  Safe to call at any time."""
+        if self._device is None:
+            return False
+        addresses = [endpoint.bEndpointAddress for endpoint in (self._ep_in, self._ep_out) if endpoint is not None]
+        if not addresses:
+            return False
+        self._buffer.clear()
+        return all([self._clear_halt(address) for address in addresses])
+
     def _seconds(self) -> float:
         try:
             value = float(self.timeout)
@@ -274,8 +304,13 @@ class HdsHidTransport:
             report = bytes(self._ep_in.read(self.report_size, timeout=timeout))
         except Exception as exc:
             self.last_error = "%s: %s" % (type(exc).__name__, exc)
+            self._failures += 1
+            if self.clear_halt_on_error and self._failures >= 2:
+                self.recover()
+                self._failures = 0
             return False
         if not report:
             return False
+        self._failures = 0
         self._buffer.extend(report)
         return True
