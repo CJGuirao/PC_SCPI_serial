@@ -39,14 +39,36 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(transport.recover())
         self.assertEqual(transport._device.cleared, [0x81, 0x01])
 
-    def test_two_consecutive_read_failures_trigger_recovery(self):
+    def test_read_failure_never_clears_halt(self):
+        """Regression: clearing a halt mid-read is what truncated every capture.
+
+        The scope pushes a whole reply into the interrupt endpoint and drops it
+        if the host stops polling, so the read path must never issue clear_halt
+        or count failures. This used to make even *IDN? return nothing.
+        """
         transport = stalling_transport()
         calls = []
         transport.recover = lambda: calls.append("recover") or True
-        transport._pump(5)
+        for _ in range(5):
+            transport._pump(5)
         self.assertEqual(calls, [])
-        transport._pump(5)
+
+    def test_write_failure_triggers_recovery_once(self):
+        transport = stalling_transport()
+        calls = []
+        transport.recover = lambda: calls.append("recover") or True
+        with self.assertRaises(Exception):
+            transport.write(b"*IDN?\n")
         self.assertEqual(calls, ["recover"])
+
+    def test_write_failure_skips_recovery_when_disabled(self):
+        transport = stalling_transport()
+        transport.recover_on_write_failure = False
+        calls = []
+        transport.recover = lambda: calls.append("recover") or True
+        with self.assertRaises(Exception):
+            transport.write(b"*IDN?\n")
+        self.assertEqual(calls, [])
 
     def test_recover_without_a_device_is_safe(self):
         self.assertFalse(HdsHidTransport().recover())

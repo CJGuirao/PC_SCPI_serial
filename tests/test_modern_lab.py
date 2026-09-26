@@ -16,7 +16,7 @@ class FrontPanelTests(unittest.TestCase):
         self.app = App(self.root)
         self.scope = Mock(spec=OWONScopeController)
         self.scope.is_connected = True
-        for name in ("VOLTAGE_SCALES", "TIMEBASE_SCALES"):
+        for name in ("VOLTAGE_SCALES", "TIMEBASE_SCALES", "FRAMING_NAMES"):
             setattr(self.scope, name, getattr(OWONScopeController, name))
         self.scope.waveform_data = Mock()
         self.scope.waveform_data.channels = []
@@ -34,9 +34,15 @@ class FrontPanelTests(unittest.TestCase):
         self.assertTrue(predicate())
 
     def test_encoder_detents_callbacks_and_limits(self):
+        # The volts/div knob steps the widget and its callback sets the software's
+        # display scale. It is not a write: on this firmware a volts/div written
+        # over SCPI moves the label it reports and nothing else, so the control
+        # that has to work is the one the app draws with.
         self.app.step_choice("ch1_scale", self.scope.VOLTAGE_SCALES, 1,
                              lambda: self.app.set_channel_scale(1, self.app.ch1_scale.get()))
-        self.scope.set_channel_scale.assert_called_once_with(1, "2v")
+        self.scope.set_channel_scale.assert_not_called()
+        self.assertIn("display scale", self.app.log_text.get("1.0", "end"))
+        self.assertEqual(self.app.ch1_scale.get(), self.app._display_scale[1])
         self.app.ch1_scale.set(self.scope.VOLTAGE_SCALES[-1])
         self.scope.set_channel_scale.reset_mock()
         self.app.step_choice("ch1_scale", self.scope.VOLTAGE_SCALES, 1,
@@ -48,6 +54,28 @@ class FrontPanelTests(unittest.TestCase):
         before = self.app.timebase_scale.get()
         self.app.step_choice("timebase_scale", self.scope.TIMEBASE_SCALES, 1, self.app.set_timebase)
         self.assertEqual(before, self.app.timebase_scale.get())
+
+    def test_a_framing_change_on_the_instrument_reaches_the_panel(self):
+        # The user sets the volts/div from the CH1 menu, with no write from here.
+        # The watch has to see it, drop the cached header so the next capture is
+        # decoded against the new framing, and move the panel's own control - the
+        # one that otherwise "does nothing" while the time base looks fine.
+        self.scope.framing_signature = Mock(
+            return_value=("500mv", "10X", "1ms"))
+        self.app.watch_framing()
+        self.scope.invalidate_capture_header.assert_not_called()
+
+        self.scope.framing_signature = Mock(return_value=("5v", "10X", "1ms"))
+        self.app.watch_framing()
+        self.scope.invalidate_capture_header.assert_called_once_with()
+        self.assertEqual("5v", self.app.ch1_scale.get())
+        self.assertIn("framing changed", self.app.log_text.get("1.0", "end"))
+
+    def test_an_unchanged_framing_costs_nothing(self):
+        self.scope.framing_signature = Mock(return_value=("500mv", "10X", "1ms"))
+        self.app.watch_framing()
+        self.app.watch_framing()
+        self.scope.invalidate_capture_header.assert_not_called()
 
     def test_capture_async_and_channel_identity(self):
         self.scope.waveform_data.channels = [

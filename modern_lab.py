@@ -2,6 +2,7 @@
 import math
 import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk
 from pathlib import Path
@@ -17,6 +18,29 @@ YELLOW = "#ffe33e"
 CYAN = "#26d7e8"
 ASSETS = Path(__file__).resolve().parent / "assets" / "modern_lab"
 
+#: Gap between the end of one live capture and the start of the next. A screen
+#: capture costs about 0.5 s on this instrument even with the header reused -
+#: the endpoint hands over 64 bytes every 32 ms - so live refresh is
+#: instrument-limited at roughly two frames per second, and this gap only gives
+#: the firmware a moment before the next frame is asked for.
+LIVE_GAP_MS = 120
+
+#: Frames between framing watches in the live loop. Three text reads cost ~96 ms
+#: against the header's 254 ms, so this runs oftener than LIVE_HEADER_EVERY and a
+#: front-panel volts/div still shows up in about a second.
+LIVE_FRAMING_EVERY = 4
+
+#: Live frames between calibrations against the instrument's own readings. The
+#: measurement block is a few round trips, and it is what keeps the volts right
+#: when the header's volts/div label has drifted from the gain.
+LIVE_CALIBRATE_EVERY = 8
+
+#: Re-read the capture header every this many live frames. The header is a
+#: measured 254-352 ms of each frame and only changes when a setting does, so it
+#: is reused; re-reading it this often bounds how long a change made on the
+#: instrument's own front panel can go unnoticed by the plot.
+LIVE_HEADER_EVERY = 12
+
 
 class Rotary(tk.Canvas):
     """A focusable detented encoder: drag up/right, wheel, or arrow keys."""
@@ -27,7 +51,8 @@ class Rotary(tk.Canvas):
         self.variable, self.change, self.values = variable, change, values
         self.size = size
         self.sprite = ImageTk.PhotoImage(
-            Image.open(ASSETS / "knob.png").convert("RGBA").resize((size, size), Image.Resampling.LANCZOS))
+            Image.open(ASSETS / "knob.png").convert("RGBA").resize((size, size), Image.Resampling.LANCZOS),
+            master=self)
         self.create_image(size / 2, size / 2, image=self.sprite)
         self.marker = self.create_line(0, 0, 0, 0, fill="#f5f4e9", width=3, capstyle=tk.ROUND)
         self.anchor = None
@@ -95,8 +120,17 @@ class ModernLabUI:
         self._closing = False
         self._results = queue.Queue()
         self._live_timer = None
+        self._live_started = None
+        self._live_period = None
+        self._live_frames = 0
+        self._dmm_tick = 0
+        #: Last framing signature seen from the instrument, for the live watch.
+        self._framing_signature = None
         self._drawer_open = False
         self._vars = {}
+        # Live controls apply shortly after the value settles, so a dragged knob
+        # does not flood the instrument with one write per detent.
+        self._live_apply = {}
         self._button_images = {}
         self.root.protocol("WM_DELETE_WINDOW", self.close_panel)
 
@@ -106,15 +140,23 @@ class ModernLabUI:
                  font=("Segoe UI", 19, "bold")).pack(side="left")
         tk.Label(header, text="  /  DIGITAL STORAGE OSCILLOSCOPE", bg=PANEL,
                  fg="#646c6c", font=("Segoe UI", 9)).pack(side="left", padx=8)
-        self.conn_type = tk.StringVar(value="lan")
+        self.conn_type = tk.StringVar(value="usb")
         self.device_info = tk.StringVar(value="Not connected")
-        ttk.Combobox(header, textvariable=self.conn_type, values=("lan", "usb"),
-                     state="readonly", width=5).pack(side="left", padx=(20, 5))
+        type_box = ttk.Combobox(header, textvariable=self.conn_type, values=("lan", "usb"),
+                                state="readonly", width=5)
+        type_box.pack(side="left", padx=(20, 5))
+        # The HDS200/HDS300 is a USB instrument, so USB is the default. A LAN
+        # address means nothing to it, so the field is only on screen for the
+        # transport that uses it - otherwise it invites typing an address that
+        # would be ignored.
         self.conn_address = ttk.Entry(header, width=16)
         self.conn_address.insert(0, "10.1.1.131")
-        self.conn_address.pack(side="left", padx=5)
+        self.conn_hint = tk.Label(header, text="auto-detect", bg=PANEL, fg="#646c6c",
+                                  font=("Segoe UI", 9))
         self.connect_btn = ttk.Button(header, text="Connect", command=lambda: self.action(self.toggle_connection))
         self.connect_btn.pack(side="left", padx=5)
+        self.sync_connection_fields()
+        type_box.bind("<<ComboboxSelected>>", lambda event: self.sync_connection_fields())
 
         chassis = tk.Frame(self.root, bg=PANEL, bd=3, relief="ridge")
         chassis.pack(fill="both", expand=True, padx=12, pady=(0, 8))
@@ -138,6 +180,8 @@ class ModernLabUI:
         self.live_btn.configure(command=self.toggle_live)
         self.live_btn.pack(side="left", expand=True, fill="x", padx=3)
         self.key(acq, "CAPTURE", self.download_waveform).pack(side="left", expand=True, fill="x", padx=3)
+        # AUTO is the front panel's autoset: find the signal and frame it.
+        self.key(acq, "AUTO", self.auto_frame, color="#9cd4e8").pack(side="left", expand=True, fill="x", padx=3)
         self.key(acq, "SINGLE", self.single_trigger).pack(side="left", expand=True, fill="x", padx=3)
         ttk.Label(controls, text="Knobs: drag • wheel • arrow keys",
                   foreground="#626968").grid(row=3, column=0, columnspan=2, pady=(9, 0))
@@ -152,6 +196,13 @@ class ModernLabUI:
         ttk.Label(footer, textvariable=self.time_var).pack(side="right")
         self.update_time()
         self._poll_timer = self.root.after(80, self.poll_capture)
+        # Before anything is attached the instrument's channel count is unknown,
+        # so the panel opens showing one channel and reveals a second one only
+        # once a two-channel instrument confirms it.
+        try:
+            self.apply_channel_count()
+        except Exception:
+            pass
 
     def group(self, parent, title, row, column, span=1):
         frame = ttk.LabelFrame(parent, text=title, padding=7)
@@ -166,9 +217,12 @@ class ModernLabUI:
         if color == "#e9e9e3":
             width = max(90, len(text) * 8 + 24)
             if width not in self._button_images:
+                # Bound to the widget's own interpreter: a photo image left to
+                # the default root ends up in whichever window was created
+                # first, and then does not exist for any other one.
                 self._button_images[width] = ImageTk.PhotoImage(
                     Image.open(ASSETS / "button.png").convert("RGBA").resize(
-                        (width, 40), Image.Resampling.LANCZOS))
+                        (width, 40), Image.Resampling.LANCZOS), master=parent)
             button.configure(image=self._button_images[width], compound="center",
                              bg=PANEL, activebackground=PANEL, bd=0, padx=0, pady=0)
         return button
@@ -187,6 +241,26 @@ class ModernLabUI:
             self.status_var.set("Acquiring waveform… please wait")
             return False
         return True
+
+    def choices(self, method, fallback):
+        """A choice list from the controller, falling back to the class constant.
+
+        The HDS series takes different acquisition modes and memory depths from
+        the older SDS dialect, so the controller answers for the instrument in
+        front of it instead of the UI hard-coding one of them.
+        """
+        getter = getattr(self.scope, method, None)
+        if callable(getter):
+            try:
+                values = list(getter() or ())
+            except Exception:
+                values = []
+            if values:
+                return values
+        try:
+            return list(getattr(self.scope, fallback, ()) or ())
+        except Exception:
+            return []
 
     def selector(self, parent, name, values, default, command, width=9):
         var = tk.StringVar(value=default)
@@ -226,39 +300,74 @@ class ModernLabUI:
             widget.set(values[target])
             command()
 
-    def numeric(self, parent, name, command, size=48):
+    def numeric(self, parent, name, command, size=48, live=False, step=1.0):
+        """A knob plus an entry box.
+
+        ``live=True`` drops the Set button and applies the value as soon as it
+        stops changing, the way a front-panel knob behaves. ``step`` is how much
+        one detent moves the value, so a control measured in divisions does not
+        jump a whole unit at a time.
+        """
         var = tk.StringVar(value="0")
         self._vars[name] = var
         row = ttk.Frame(parent)
         row.pack(pady=1)
-        knob = Rotary(row, var, lambda d: self.step_number(name, d, command), size=size)
+        knob = Rotary(row, var, lambda d: self.step_number(name, d, command, step, live), size=size)
         knob.pack(side="left", padx=(0, 3))
         entry = ttk.Entry(row, textvariable=var, width=7, justify="center")
         setattr(self, name, entry)
         entry.pack(side="left")
         entry.bind("<Return>", lambda e: self.action(command))
-        ttk.Button(row, text="Set", width=3, command=lambda: self.action(command)).pack(side="left", padx=2)
+        if live:
+            var.trace_add("write", lambda *_: self.schedule_live(name, command))
+        else:
+            ttk.Button(row, text="Set", width=3, command=lambda: self.action(command)).pack(side="left", padx=2)
+        return knob
 
-    def step_number(self, name, direction, command):
+    def schedule_live(self, name, command, delay=200):
+        """Queue a live write, replacing any still pending for the same control."""
+        if not self.root.winfo_exists():
+            return
+        pending = self._live_apply.get(name)
+        if pending:
+            try:
+                self.root.after_cancel(pending)
+            except (tk.TclError, ValueError):
+                pass
+        self._live_apply[name] = self.root.after(delay, lambda: self.apply_live(name, command))
+
+    def apply_live(self, name, command):
+        self._live_apply.pop(name, None)
+        # The window may have gone while a live write was still queued.
+        if not self.root.winfo_exists():
+            return
+        if self.ready():
+            command()
+
+    def step_number(self, name, direction, command, step=1.0, live=False):
         if not self.ready():
             return
         try:
-            value = float(self._vars[name].get()) + direction
+            value = float(self._vars[name].get()) + direction * step
         except ValueError:
             self.status_var.set("Enter a numeric value before turning this knob")
             return
-        self._vars[name].set(str(int(value)) if value.is_integer() else str(value))
-        command()
+        self._vars[name].set("%g" % value)
+        if not live:
+            command()
 
     def build_horizontal(self, parent):
         self.encoder(parent, "timebase_scale", self.scope.TIMEBASE_SCALES, "1ms", self.set_timebase)
         ttk.Label(parent, text="TIME / DIV", font=("Segoe UI", 9, "bold")).pack(pady=(1, 4))
-        self.numeric(parent, "timebase_offset", self.set_timebase_offset)
-        ttk.Label(parent, text="Position (px)").pack()
+        # Position is expressed in divisions, which is how a scope front panel
+        # thinks about it, and applied live.
+        self.numeric(parent, "timebase_offset", self.set_timebase_position, live=True, step=0.5)
+        ttk.Label(parent, text="POSITION (div)", font=("Segoe UI", 9, "bold")).pack(pady=(2, 0))
 
     def build_trigger(self, parent):
-        self.numeric(parent, "trigger_level", self.set_trigger_level, size=64)
-        ttk.Label(parent, text="LEVEL (px)", font=("Segoe UI", 9, "bold")).pack(pady=(0, 5))
+        self.numeric(parent, "trigger_level", self.set_trigger_level, size=64,
+                     live=True, step=0.1)
+        ttk.Label(parent, text="TRIGGER LEVEL (V)", font=("Segoe UI", 9, "bold")).pack(pady=(0, 5))
         for label, name, values, default, command in (
             ("Mode", "trigger_mode", self.scope.TRIGGER_MODES, "AUTO", self.set_trigger_mode),
             ("Source", "trigger_source", self.scope.TRIGGER_SOURCES, "CH1", self.set_trigger_source),
@@ -269,22 +378,28 @@ class ModernLabUI:
             self.selector(row, name, values, default, command, width=7).pack(side="right")
 
     def build_channels(self, parent):
+        # Only the channels the instrument actually has are shown; a
+        # single-channel HDS271 answers nothing on :CH2:, so its whole column is
+        # hidden rather than left sitting there dead.
+        self._channel_frames = {}
         for ch, color in ((1, YELLOW), (2, CYAN)):
             col = tk.Frame(parent, bg=PANEL)
+            self._channel_frames[ch] = col
             col.pack(side="left", expand=True, fill="both", padx=5)
             state = tk.BooleanVar(value=(ch == 1))
             setattr(self, f"ch{ch}_display", state)
-            key = tk.Checkbutton(col, text=f"CH{ch}", variable=state, indicatoron=False,
+            key = tk.Checkbutton(col, text=f"CH{ch} DISPLAY", variable=state, indicatoron=False,
                                 bg="#bfc3bd", selectcolor=color, activebackground=color,
-                                font=("Segoe UI", 11, "bold"), bd=2, relief="raised",
-                                command=lambda c=ch, v=state: self.toggle_channel(c, v), pady=5)
+                                font=("Segoe UI", 9, "bold"), bd=2, relief="raised",
+                                command=lambda c=ch, v=state: self.toggle_channel(c, v), pady=4)
             key.pack(fill="x", pady=(0, 3))
             command = lambda c=ch: self.set_channel_scale(c, getattr(self, f"ch{c}_scale").get())
             self.encoder(col, f"ch{ch}_scale", self.scope.VOLTAGE_SCALES, "1v", command, size=68)
             ttk.Label(col, text="VOLTS / DIV", font=("Segoe UI", 9, "bold")).pack()
             self.numeric(col, f"ch{ch}_offset",
-                         lambda c=ch: self.set_channel_offset(c, getattr(self, f"ch{c}_offset").get()))
-            ttk.Label(col, text="Position").pack()
+                         lambda c=ch: self.set_channel_offset(c, getattr(self, f"ch{c}_offset").get()),
+                         live=True, step=0.1)
+            ttk.Label(col, text="POSITION (V)", font=("Segoe UI", 9, "bold")).pack(pady=(2, 0))
             for title, suffix, values, default, setter in (
                 ("Coupling", "coupling", self.scope.COUPLING_MODES, "DC", self.set_channel_coupling),
                 ("Probe", "probe", self.scope.PROBE_ATTEN, "X10", self.set_channel_probe)):
@@ -302,6 +417,56 @@ class ModernLabUI:
         else:
             variable.set(not variable.get())
 
+    def show_channels(self, available):
+        """Show only this many channels, on the panel and in the plot readouts.
+
+        A single-channel HDS271 answers nothing on :CH2:, so its column, its plot
+        readout and the measurement source are all removed rather than left on
+        screen doing nothing.
+        """
+        for channel, frame in getattr(self, "_channel_frames", {}).items():
+            if channel <= available:
+                if not frame.winfo_manager():
+                    frame.pack(side="left", expand=True, fill="both", padx=5)
+            else:
+                frame.pack_forget()
+
+        for channel, widgets in getattr(self, "_readout_widgets", {}).items():
+            for index, widget in enumerate(widgets):
+                if channel <= available:
+                    if not widget.winfo_manager():
+                        widget.pack(side="left", padx=(12, 4) if index == 0 else (0, 12))
+                else:
+                    widget.pack_forget()
+
+        source = getattr(self, "meas_source", None)
+        if source is not None:
+            values = tuple("CH%d" % number for number in range(1, available + 1))
+            source.configure(values=values)
+            if source.get() not in values:
+                source.set(values[0])
+
+        self.log("%s reports %d channel%s" % (
+            getattr(self.scope, "model", None) or "instrument",
+            available, "" if available == 1 else "s"))
+
+    def apply_channel_count(self):
+        """Probe the instrument, then show only the channels it really has.
+
+        Range is probed rather than inferred from the model name, so a
+        two-channel HDS200/HDS300 keeps its second column.
+        """
+        if not getattr(self.scope, "is_connected", False):
+            # Nothing attached yet: only CH1 is certain, and a column for a
+            # channel the instrument does not have is the thing being avoided.
+            self.show_channels(1)
+            return
+        try:
+            available = self.scope.get_channel_count()
+        except Exception:
+            available = 1
+        self.show_channels(available)
+
     def build_display(self, parent):
         top = tk.Frame(parent, bg=SCREEN)
         top.pack(fill="x")
@@ -318,13 +483,17 @@ class ModernLabUI:
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
         readouts = tk.Frame(parent, bg=SCREEN)
         readouts.pack(fill="x", pady=(0, 8))
+        self._readout_widgets = {}
         for ch, color in ((1, YELLOW), (2, CYAN)):
-            tk.Label(readouts, text=f"CH{ch}", fg=INK, bg=color,
-                     font=("Consolas", 11, "bold"), padx=6).pack(side="left", padx=(12, 4))
+            tag = tk.Label(readouts, text=f"CH{ch}", fg=INK, bg=color,
+                           font=("Consolas", 11, "bold"), padx=6)
+            tag.pack(side="left", padx=(12, 4))
             text = tk.StringVar(value="— /div")
             setattr(self, f"ch{ch}_readout", text)
-            tk.Label(readouts, textvariable=text, bg=SCREEN, fg=color,
-                     font=("Consolas", 10)).pack(side="left", padx=(0, 12))
+            value = tk.Label(readouts, textvariable=text, bg=SCREEN, fg=color,
+                             font=("Consolas", 10))
+            value.pack(side="left", padx=(0, 12))
+            self._readout_widgets[ch] = (tag, value)
         keys = tk.Frame(parent, bg="#303638")
         self._display_keys = keys
         keys.pack(fill="x", pady=(5, 0))
@@ -350,7 +519,7 @@ class ModernLabUI:
         self.ax.yaxis.set_minor_locator(AutoMinorLocator(5))
         self.ax.grid(True, which="major", color="#6e8282", alpha=.35, linestyle=":")
         self.ax.grid(True, which="minor", color="#425050", alpha=.16, linestyle=":")
-        self.ax.set_xlabel("Time (ms)", color="#94a5a5", fontsize=9)
+        self.ax.set_xlabel("Time", color="#94a5a5", fontsize=9)
         self.ax.set_ylabel("Voltage (V)", color="#94a5a5", fontsize=9)
         if empty:
             self.ax.set_xlim(0, 10)
@@ -358,7 +527,9 @@ class ModernLabUI:
             self.ax.text(.5, .5, "READY TO ACQUIRE",
                          transform=self.ax.transAxes, ha="center", va="center",
                          color="#748886", fontsize=13, fontweight="bold")
-            self.ax.text(.5, .44, "Connect your scope, then press CAPTURE",
+            self.ax.text(.5, .44,
+                         "Press CAPTURE to read the screen" if self._is_connected()
+                         else "Connect your scope, then press CAPTURE",
                          transform=self.ax.transAxes, ha="center", va="center",
                          color="#617472", fontsize=10)
 
@@ -373,11 +544,33 @@ class ModernLabUI:
         self.meas_source.set("CH1")
         self.meas_source.pack(side="left", anchor="n", padx=5)
         self.key(measure, "READ", self.get_measurements).pack(side="left", anchor="n", padx=5)
+        # The HDS271 carries a multimeter next to the scope: :DMM:MEAS? reads it
+        # and :DMM:REL/:DMM:CONFigure set it up. It is a separate subsystem, so
+        # its readout lives here rather than on the trace, and it is polled on
+        # the same timer as the rest of the status.
+        multimeter = ttk.Frame(measure, padding=(12, 0, 6, 0))
+        multimeter.pack(side="left", anchor="n", padx=5)
+        ttk.Label(multimeter, text="MULTIMETER", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        self.dmm_value = tk.StringVar(value="—")
+        tk.Label(multimeter, textvariable=self.dmm_value, bg=SCREEN, fg="#9cf0c9",
+                 font=("Consolas", 15, "bold"), width=13, anchor="e",
+                 padx=8, pady=4).pack(pady=(3, 5))
+        self.dmm_note = tk.StringVar(value="")
+        self.dmm_relative = tk.BooleanVar(value=False)
+        self.selector(multimeter, "dmm_function", ("VOLT", "AMP"), "VOLT",
+                      self.set_dmm_function).pack(pady=1)
+        self.selector(multimeter, "dmm_type", ("DC", "AC"), "DC",
+                      self.set_dmm_function).pack(pady=1)
+        self.key(multimeter, "REL", self.toggle_dmm_relative).pack(fill="x", pady=(5, 2))
+        ttk.Label(multimeter, textvariable=self.dmm_note, wraplength=150,
+                  foreground="#7a4a1e", font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
         self.measurement_text = self.text_area(measure)
         for label, name, values, default, command in (
-            ("Type", "acq_type", self.scope.ACQ_TYPES, "SAMPle", self.set_acquire_type),
+            ("Type", "acq_type", self.choices("acquire_mode_choices", "ACQ_TYPES"),
+             "SAMPle", self.set_acquire_type),
             ("Averages", "acq_average", self.scope.AVG_COUNTS, "4", self.set_acquire_average),
-            ("Memory", "mem_depth", self.scope.MEMORY_DEPTHS, "10K", self.set_memory_depth)):
+            ("Memory", "mem_depth", self.choices("memory_depth_choices", "MEMORY_DEPTHS"),
+             "4K", self.set_memory_depth)):
             column = ttk.Frame(acquire)
             column.pack(side="left", anchor="n", padx=15)
             ttk.Label(column, text=label).pack(anchor="w", pady=5)
@@ -434,23 +627,87 @@ class ModernLabUI:
         elif self.ready():
             self.auto_refresh_var.set(True)
             self.live_btn.configure(text="PAUSE REFRESH", bg="#f3bd75")
+            # A new run starts with no measured rate, so the label does not show
+            # whatever the previous run happened to average.
+            self._live_period = None
+            self._live_frames = 0
             self.download_waveform()
 
-    def download_waveform(self):
+    def start_worker(self, worker, label):
+        """Run a background worker, and never leave the panel wedged.
+
+        Every control is gated on ``_busy``, so a worker that cannot even be
+        started - which is what happened when the AUTO command referred to a
+        module the file never imported - would otherwise leave the whole panel
+        refusing input, with nothing on screen to say why.
+        """
+        try:
+            threading.Thread(target=worker, daemon=True).start()
+        except Exception as exc:
+            self._busy = False
+            self.capture_state.set("ACQUISITION FAILED")
+            self.status_var.set(str(exc))
+            self.log(f"Could not start {label}: {exc}", "ERROR")
+            return False
+        return True
+
+    def watch_framing(self):
+        """Notice a framing change made on the instrument and re-read the header.
+
+        Only three cheap text reads. When one moves, the cached header is dropped
+        so the next capture is parsed against the instrument's current framing, the
+        change is logged, and :meth:`framing_changed` is called for the panel's own
+        controls to follow.
+        """
+        try:
+            signature = self.scope.framing_signature()
+        except Exception as exc:                                   # noqa: BLE001
+            self.log("Framing watch failed: %s" % exc)
+            return
+        if signature == self._framing_signature:
+            return
+        first = self._framing_signature is None
+        self._framing_signature = signature
+        if first:
+            return
+        self.scope.invalidate_capture_header()
+        self.log("The instrument's framing changed: %s"
+                 % ", ".join("%s %s" % (name, value) for name, value
+                             in zip(self.scope.FRAMING_NAMES, signature)))
+        self.framing_changed()
+
+    def framing_changed(self):
+        """Hook for a framing change seen on the instrument. The panel syncs here."""
+
+    def download_waveform(self, reuse_header=False):
+        """Start a capture on a worker thread.
+
+        ``reuse_header=True`` is the live path: it skips re-reading the capture
+        header, which is a third of the frame, and lets the plot run at about
+        twice the rate. A capture the user asked for gets a fresh header.
+        """
         if not self.ready():
             return
         if self._live_timer:
             self.root.after_cancel(self._live_timer)
             self._live_timer = None
         self._busy = True
+        self._live_started = time.monotonic()
         self.capture_state.set("ACQUIRING…")
         self.status_var.set("Downloading waveform…")
         def worker():
             try:
-                self._results.put((self.scope.download_waveform_data(), None))
+                # Calibrate every capture the user asked for, and now and then in
+                # the live loop. The measurement block costs a few round trips;
+                # without it the volts come from the header's volts/div label, and
+                # this firmware does not keep that label in step with the gain.
+                calibrate = (not reuse_header) or (self._live_frames % LIVE_CALIBRATE_EVERY == 0)
+                self._results.put(
+                    (self.scope.download_waveform_data(reuse_header=reuse_header,
+                                                       calibrate=calibrate), None))
             except Exception as exc:
                 self._results.put((False, str(exc)))
-        threading.Thread(target=worker, daemon=True).start()
+        self.start_worker(worker, "capture")
 
     def poll_capture(self):
         try:
@@ -463,9 +720,23 @@ class ModernLabUI:
                 self.finish_close()
                 return
             if success:
+                self.refresh_cursors()
                 self.plot_waveform()
-                self.capture_state.set("LIVE • 2 s" if self.auto_refresh_var.get() else "CAPTURED")
+                if self.auto_refresh_var.get():
+                    # Show the rate actually achieved rather than the rate asked
+                    # for: a capture is instrument-limited, so the honest figure
+                    # is the one measured between frames.
+                    now = time.monotonic()
+                    if self._live_started:
+                        period = now - self._live_started
+                        self._live_period = (period if self._live_period is None
+                                             else 0.7 * self._live_period + 0.3 * period)
+                    self.capture_state.set("LIVE • %.1f s" % self._live_period
+                                           if self._live_period else "LIVE")
+                else:
+                    self.capture_state.set("CAPTURED")
                 self.status_var.set("Waveform acquired")
+                self.report_auto_frame()
             else:
                 self.capture_state.set("ACQUISITION FAILED")
                 self.status_var.set(error or "Waveform download failed")
@@ -474,9 +745,26 @@ class ModernLabUI:
                     self.toggle_live()
                 self.capture_state.set("ACQUISITION FAILED")
             if self.auto_refresh_var.get():
-                self._live_timer = self.root.after(2000, self.download_waveform)
+                # Reuse the header on most frames, and re-read it now and then so
+                # a change made on the front panel still reaches the plot.
+                self._live_frames += 1
+                # The framing gets watched on its own, cheaper schedule: three
+                # 32 ms text reads against the 254 ms header. A volts/div set from
+                # the instrument's menu would otherwise sit unseen until the header
+                # came round - seconds during which the time base, whose label is
+                # read every frame, appears to work and the volts/div does not.
+                if (self._live_frames % LIVE_FRAMING_EVERY) == 0:
+                    self.watch_framing()
+                reuse = (self._live_frames % LIVE_HEADER_EVERY) != 0
+                self._live_timer = self.root.after(
+                    LIVE_GAP_MS, lambda: self.download_waveform(reuse_header=reuse))
         if not self._closing or self._busy:
             self._poll_timer = self.root.after(80, self.poll_capture)
+            # The multimeter is read on the same timer, but far less often: one
+            # query is ~32 ms and its reading does not move quickly.
+            self._dmm_tick = (self._dmm_tick + 1) % 8
+            if self._dmm_tick == 0:
+                self.poll_dmm()
 
     def close_panel(self):
         self._closing = True
@@ -494,5 +782,13 @@ class ModernLabUI:
             timer = getattr(self, name, None)
             if timer:
                 self.root.after_cancel(timer)
+        # Live controls queue a write per knob movement; none may outlive the window.
+        for timer in list(getattr(self, "_live_apply", {}).values()):
+            if timer:
+                try:
+                    self.root.after_cancel(timer)
+                except (tk.TclError, ValueError):
+                    pass
+        self._live_apply.clear()
         self.scope.disconnect()
         self.root.destroy()
