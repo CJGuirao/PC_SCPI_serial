@@ -24,6 +24,7 @@ if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
 from owon_controller import OWONScopeController                  # noqa: E402
+from scope_setup import ScopeSetup                              # noqa: E402
 from waveform_data import HDS_MANUAL_CALIBRATION_TRIM            # noqa: E402
 
 
@@ -62,8 +63,12 @@ def main(argv):
             print("nothing to scale: the capture is flat")
             return 1
 
-        trim = true_vpp / shown
-        print("\ntrim needed     : %.6g  (%.4g / %.4g)\n" % (trim, true_vpp, shown))
+        # The capture already carries whatever trim is in force, so the factor
+        # compounds with it - calibrating twice must not undo the first correction.
+        current = float(HDS_MANUAL_CALIBRATION_TRIM or 1.0)
+        trim = ScopeSetup.trim_from(true_vpp, shown, current=current)
+        print("\ntrim needed     : %.6g  (%s%.4g / %.4g)\n"
+              % (trim, "" if current == 1.0 else "%.6g x " % current, true_vpp, shown))
         print("paste this line, replacing the one that is there now:\n")
         print("HDS_MANUAL_CALIBRATION_TRIM = %.6g\n" % trim)
         print("then the grid reads a %.4g Vpp signal as:" % true_vpp)

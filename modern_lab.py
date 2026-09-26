@@ -11,6 +11,8 @@ from PIL import Image, ImageTk
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.ticker import AutoMinorLocator, MaxNLocator
 
+from scope_setup import PROBE_CHOICES, ScopeSetup, device_label
+
 PANEL = "#d5d4cf"
 INK = "#252a2c"
 SCREEN = "#101719"
@@ -497,10 +499,13 @@ class ModernLabUI:
         keys = tk.Frame(parent, bg="#303638")
         self._display_keys = keys
         keys.pack(fill="x", pady=(5, 0))
+        # ZOOM +/- were removed: they moved the axes while live acquisition was
+        # re-drawing them from the capture, so the view jumped back and forth.
+        # Framing is the volts/div and time/div controls' job in the meantime.
         for label, command in (
             ("MEASURE", lambda: self.show_drawer(0)),
             ("ACQUIRE", lambda: self.show_drawer(1)),
-            ("ZOOM +", self.zoom_in), ("ZOOM −", self.zoom_out),
+            ("SETUP", self.open_setup),
             ("FIT", self.auto_scale), ("SAVE", self.save_waveform),
             ("UTILITY", lambda: self.show_drawer(2))):
             button = self.key(keys, label, command, color="#444c4e")
@@ -792,3 +797,191 @@ class ModernLabUI:
         self._live_apply.clear()
         self.scope.disconnect()
         self.root.destroy()
+
+
+class SetupDialog(tk.Toplevel):
+    """Configure and save the bench settings: which scope, and its calibration.
+
+    It only collects values; the app owns the file and the applying, so what is
+    written and what takes effect are the same single path. Every field is
+    pre-filled from what is in force, so opening it and pressing Save is a no-op
+    rather than a reset.
+    """
+
+    def __init__(self, parent, setup, devices=None, last_amplitude=None, on_apply=None):
+        super().__init__(parent)
+        self.title("Setup")
+        self.configure(bg="#202628")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.setup = setup
+        self.on_apply = on_apply
+        self._last_amplitude = last_amplitude
+        self._devices = list(devices or [])
+        self._serial_by_label = {}
+
+        body = tk.Frame(self, bg="#202628", padx=14, pady=12)
+        body.pack(fill="both", expand=True)
+        row = 0
+
+        tk.Label(body, text="BENCH SETUP", bg="#202628", fg=YELLOW,
+                 font=("Segoe UI", 10, "bold")).grid(row=row, column=0, columnspan=3,
+                                                     sticky="w", pady=(0, 10))
+        row += 1
+
+        # -- which scope ----------------------------------------------------
+        tk.Label(body, text="Scope", bg="#202628", fg="#f1f3ed", anchor="w",
+                 font=("Segoe UI", 9)).grid(row=row, column=0, sticky="w", pady=3)
+        self.device_choice = tk.StringVar(value=self._device_default())
+        self.device_box = ttk.Combobox(body, textvariable=self.device_choice,
+                                       values=self._device_labels(), state="readonly",
+                                       width=44)
+        self.device_box.grid(row=row, column=1, sticky="we", pady=3)
+        tk.Button(body, text="Rescan", command=self.rescan, bg="#444c4e", fg="#f1f3ed",
+                  relief="flat", padx=6, cursor="hand2").grid(row=row, column=2, padx=(6, 0))
+        row += 1
+        tk.Label(body, text="Which attached scope to talk to. Save one here when more than one\n"
+                            "is plugged in: otherwise the first found is used, and the log says so.",
+                 bg="#202628", fg="#9fb0b3", justify="left", anchor="w",
+                 font=("Segoe UI", 8)).grid(row=row, column=1, columnspan=2, sticky="w")
+        row += 1
+
+        # -- calibration ----------------------------------------------------
+        self.trim = tk.StringVar(value=self._format(self.setup.values.get("calibration_trim")))
+        self.reference = tk.StringVar(
+            value=self._format(self.setup.values.get("reference_volts_per_code"), blank=""))
+        self.amplitude = tk.StringVar(
+            value=self._format(self.setup.values.get("known_amplitude"), blank=""))
+
+        for label, variable, hint in (
+            ("Volts gain trim", self.trim,
+             "1.0 agrees with the instrument's own readings. Derive a factor here when\n"
+             "the generator, not the scope, is the reference."),
+            ("Known amplitude (Vpp)", self.amplitude,
+             "The amplitude a calibration is derived from, e.g. 25.0. Kept so the\n"
+             "field is filled in next time."),
+            ("Bench reference", self.reference,
+             "The uncalibrated fallback in volts per code. Blank keeps the value the\n"
+             "code carries, which is where it is documented."),
+        ):
+            tk.Label(body, text=label, bg="#202628", fg="#f1f3ed", anchor="w",
+                     font=("Segoe UI", 9)).grid(row=row, column=0, sticky="w", pady=(8, 0))
+            entry = tk.Entry(body, textvariable=variable, bg="#0f1416", fg=YELLOW,
+                             insertbackground=YELLOW, relief="flat", width=18,
+                             font=("Consolas", 10))
+            entry.grid(row=row, column=1, sticky="w", pady=(8, 0))
+            if label.startswith("Known"):
+                tk.Button(body, text="Calibrate now", command=self.derive_trim,
+                          bg="#444c4e", fg="#f1f3ed", relief="flat", padx=6,
+                          cursor="hand2").grid(row=row, column=2, padx=(6, 0), pady=(8, 0))
+            tk.Label(body, text=hint, bg="#202628", fg="#9fb0b3", justify="left",
+                     anchor="w", font=("Segoe UI", 8)).grid(row=row + 1, column=1,
+                                                            columnspan=2, sticky="w")
+            row += 2
+
+        tk.Label(body, text="Probe", bg="#202628", fg="#f1f3ed", anchor="w",
+                 font=("Segoe UI", 9)).grid(row=row, column=0, sticky="w", pady=(8, 0))
+        self.probe = tk.StringVar(value=self.setup.values.get("probe") or "X1")
+        ttk.Combobox(body, textvariable=self.probe, values=list(PROBE_CHOICES),
+                     state="readonly", width=8).grid(row=row, column=1, sticky="w",
+                                                     pady=(8, 0))
+        row += 1
+        tk.Label(body, text="Recorded, not applied: this instrument reads real volts at the BNC\n"
+                            "whatever probe its label claims.",
+                 bg="#202628", fg="#9fb0b3", justify="left", anchor="w",
+                 font=("Segoe UI", 8)).grid(row=row, column=1, columnspan=2, sticky="w")
+        row += 1
+
+        self.status = tk.StringVar(value="")
+        tk.Label(body, textvariable=self.status, bg="#202628", fg="#8fe28f", anchor="w",
+                 justify="left", font=("Consolas", 8), wraplength=430).grid(
+                     row=row, column=0, columnspan=3, sticky="w", pady=(10, 4))
+        row += 1
+
+        buttons = tk.Frame(body, bg="#202628")
+        buttons.grid(row=row, column=0, columnspan=3, sticky="we", pady=(4, 0))
+        for text, command in (("Save & apply", self.save_and_apply),
+                              ("Save", self.save_only),
+                              ("Close", self.destroy)):
+            tk.Button(buttons, text=text, command=command, bg="#444c4e", fg="#f1f3ed",
+                      relief="flat", padx=10, pady=5, cursor="hand2",
+                      font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 6))
+
+        self.bind("<Escape>", lambda _event: self.destroy())
+        self.grab_set()
+
+    # ------------------------------------------------------------------ helpers
+    @staticmethod
+    def _format(value, blank="1.0"):
+        if value in (None, ""):
+            return blank
+        return ("%.6g" % float(value)) if isinstance(value, (int, float)) else str(value)
+
+    def _device_labels(self):
+        """The combobox entries, and the serial each one stands for."""
+        labels = ["Automatic (first attached)"]
+        self._serial_by_label = {"Automatic (first attached)": None}
+        for info in self._devices:
+            label = device_label(info)
+            serial = (info.get("serial") or "").strip() or None
+            if serial:                      # a device with no serial cannot be chosen
+                self._serial_by_label[label] = serial
+            labels.append(label)
+        return labels
+
+    def _device_default(self):
+        wanted = self.setup.usb_serial
+        labels = self._device_labels()
+        for label, serial in self._serial_by_label.items():
+            if serial and serial == wanted:
+                return label
+        if wanted:
+            return "Automatic (first attached)"
+        return labels[0]
+
+    def rescan(self):
+        """Look again for attached scopes - a candidate is usually plugged in live."""
+        from scope_setup import attached_scopes
+        self._devices = attached_scopes()
+        self.device_box.configure(values=self._device_labels())
+        self.device_choice.set(self._device_default())
+        count = len(self._devices)
+        self.status.set("%d scope%s attached" % (count, "" if count == 1 else "s"))
+
+    def derive_trim(self):
+        """Turn a known amplitude plus the last capture into a trim factor."""
+        if self._last_amplitude is None:
+            self.status.set("No capture yet: take one with Live or Capture first.")
+            return
+        measured = self._last_amplitude()
+        # What the app shows already includes the trim in force, so the new factor
+        # compounds with it rather than replacing it.
+        trim = ScopeSetup.trim_from(self.amplitude.get(), measured,
+                                    current=self.setup.calibration_trim or 1.0)
+        if trim is None:
+            self.status.set("Need a known amplitude above 0 and a capture with a "
+                            "measured amplitude. The last capture reads %s Vpp."
+                            % ("none" if measured is None else "%.4g" % measured,))
+            return
+        self.trim.set("%.6g" % trim)
+        self.status.set("Last capture reads %.4g Vpp; a factor of %.6g makes it %.4g Vpp. "
+                        "Save & apply to use it." % (measured, trim, float(self.amplitude.get())))
+
+    # ------------------------------------------------------------------ actions
+    def collect(self):
+        """The values as this dialog shows them, validated by ScopeSetup."""
+        return ScopeSetup({
+            "usb_serial": self._serial_by_label.get(self.device_choice.get()),
+            "calibration_trim": self.trim.get(),
+            "reference_volts_per_code": self.reference.get(),
+            "probe": self.probe.get(),
+            "known_amplitude": self.amplitude.get(),
+        }, path=self.setup.path)
+
+    def save_and_apply(self):
+        if self.on_apply:
+            self.on_apply(self.collect(), True)
+
+    def save_only(self):
+        if self.on_apply:
+            self.on_apply(self.collect(), False)

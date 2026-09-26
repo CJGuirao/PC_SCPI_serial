@@ -108,9 +108,13 @@ def list_owon_devices(vid: int = OWON_VID) -> List[dict]:
         info = {"vid": dev.idVendor, "pid": dev.idProduct, "product": None, "serial": None}
         for key, attr in (("product", "iProduct"), ("serial", "iSerialNumber")):
             try:
-                info[key] = usb_util.get_string(dev, getattr(dev, attr))
+                text = usb_util.get_string(dev, getattr(dev, attr))
             except Exception:
-                pass
+                continue
+            # Some descriptors arrive NUL-padded ("MSC+HID\x00\x00\x00"), which reads
+            # as a different string to anything comparing it - including the serial
+            # match that decides which scope to open.
+            info[key] = (text or "").replace("\x00", "").strip() or None
         devices.append(info)
     return devices
 

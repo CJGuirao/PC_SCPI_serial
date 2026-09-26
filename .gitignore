@@ -5,6 +5,10 @@ __pycache__/
 *.swp
 *.env
 
+# Bench settings: the instrument's serial and the calibration for it.
+# Machine-specific, so not source - copy it between benches by hand.
+scope_setup.json
+
 # VS Code
 .vscode/
 

@@ -13,6 +13,7 @@ from matplotlib.figure import Figure
 
 from modern_lab import ModernLabUI
 from owon_controller import OWONScopeController
+from scope_setup import ScopeSetup, attached_scopes
 from waveform_data import HDS_HORIZONTAL_DIVISIONS, HDS_VERTICAL_DIVISIONS, WaveformData
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
@@ -47,6 +48,14 @@ class App(ModernLabUI):
         #: Unit and type shown after the multimeter reading, e.g. "V DC".
         self._dmm_caption = ""
         self._clock_running = True
+        #: The bench settings: which scope, and the calibration that describes it.
+        #: Loaded before anything is drawn, so the first capture is already decoded
+        #: with the right factor.
+        self.setup = ScopeSetup.load()
+        try:
+            self.setup.apply()
+        except Exception as exc:                     # a bad value must not stop start-up
+            self.log("Setup could not be applied: %s" % exc, "ERROR")
         #: The software's own display scale per channel, in the connector units the
         #: panel's control uses. Empty means Auto: follow the scale the capture was
         #: decoded at. The instrument's vertical gain is not reachable over this
@@ -132,8 +141,21 @@ class App(ModernLabUI):
                 baudrate = int(port_value) if port_value else 115200
                 # The address box is not on screen for USB, and the instrument is
                 # found by VID/PID (HDS) or auto-detected as a COM port (serial
-                # models), so nothing typed for LAN can steer this.
-                success = self.scope.connect_usb("auto", baudrate)
+                # models), so nothing typed for LAN can steer this. Which of several
+                # attached scopes to open IS steerable, and that is the serial from
+                # the setup - worth having, because the HID endpoint takes one owner
+                # at a time and opening the wrong instrument looks like no scope.
+                chosen = self.setup.usb_serial
+                attached = attached_scopes()
+                if len(attached) > 1:
+                    self.log("%d OWON USB devices attached; using %s. Pick one in SETUP."
+                             % (len(attached), chosen or "the first found"))
+                if chosen and getattr(self.scope, "is_hds", False):
+                    success = self.scope.connect_usb_hid(serial=chosen)
+                    if success:
+                        self.scope.identify_model()
+                else:
+                    success = self.scope.connect_usb("auto", baudrate)
             else:
                 port = int(port_value) if port_value else 3000
                 success = self.scope.connect_lan(address or "10.1.1.131", port)
@@ -466,6 +488,65 @@ class App(ModernLabUI):
             self.scope.single_trigger()
             self.log("Single trigger armed")
 
+    def last_capture_amplitude(self):
+        """The peak-to-peak of the last capture as the app shows it, in volts.
+
+        This is the figure a calibration is derived against, so it is read the way
+        the panel reads it: the channel it is already drawing, with the trim in
+        force included.
+        """
+        for entry in getattr(self.scope.waveform_data, "channels", []) or []:
+            volts = entry.get("waveform_data") or []
+            if len(volts) > 1:
+                return float(max(volts) - min(volts))
+        return None
+
+    def open_setup(self):
+        """Show the bench setup: which scope, and the numbers that calibrate it."""
+        from modern_lab import SetupDialog
+        if getattr(self, "_setup_window", None) is not None:
+            try:
+                self._setup_window.lift()
+                return
+            except tk.TclError:
+                self._setup_window = None
+        devices = attached_scopes()
+        self._setup_window = SetupDialog(
+            self.root, self.setup, devices=devices,
+            last_amplitude=self.last_capture_amplitude,
+            on_apply=self.save_setup)
+        self._setup_window.protocol("WM_DELETE_WINDOW", self._close_setup)
+
+    def _close_setup(self):
+        window, self._setup_window = getattr(self, "_setup_window", None), None
+        if window is not None:
+            try:
+                window.destroy()
+            except tk.TclError:
+                pass
+
+    def save_setup(self, values, apply_now):
+        """Store what the setup dialog collected, and optionally put it to work."""
+        self.setup = values
+        if apply_now:
+            try:
+                changed = self.setup.apply()
+                self.log("Setup applied: %s" % ", ".join(changed))
+            except Exception as exc:
+                messagebox.showerror("Setup", "Could not apply: %s" % exc)
+                return
+        if self.setup.save():
+            self.log("Setup saved to %s (%s)" % (self.setup.path, self.setup.as_text()))
+        else:
+            messagebox.showerror("Setup", "Could not write %s" % self.setup.path)
+            return
+        # The decode may have moved under the current capture, so redraw it.
+        if apply_now:
+            try:
+                self.plot_waveform()
+            except Exception as exc:
+                self.log("Redraw after setup failed: %s" % exc, "ERROR")
+
     def auto_scale(self):
         if self._is_connected():
             self.scope.auto_scale(True)
@@ -524,23 +605,11 @@ class App(ModernLabUI):
         for note in report.get("notes") or []:
             self.log("AUTO: " + note)
 
-    def zoom_in(self):
-        if not self.ax.lines:
-            return
-        xmin, xmax = self.ax.get_xlim()
-        xmid = (xmin + xmax) / 2.0
-        span = (xmax - xmin) * 0.5
-        self.ax.set_xlim(xmid - span / 2.0, xmid + span / 2.0)
-        self.canvas.draw_idle()
-
-    def zoom_out(self):
-        if not self.ax.lines:
-            return
-        xmin, xmax = self.ax.get_xlim()
-        xmid = (xmin + xmax) / 2.0
-        span = (xmax - xmin) * 2.0
-        self.ax.set_xlim(xmid - span / 2.0, xmid + span / 2.0)
-        self.canvas.draw_idle()
+    # ZOOM +/- used to live here. They moved the axes directly, and the live loop
+    # re-frames the plot from every capture, so a zoom either survived a fraction of
+    # a second or fought the framing: either way the view jumped. Until there is a
+    # zoom that lives in the framing itself, the volts/div and time/div controls
+    # are the way to change what is on screen.
 
     def clear_plot(self):
         self.ax.clear()
