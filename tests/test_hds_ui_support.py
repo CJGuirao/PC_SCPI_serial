@@ -140,6 +140,8 @@ class ChannelHidingTests(PanelTestCase):
     def test_second_channel_column_is_hidden_when_absent(self):
         self.scope.get_channel_count.return_value = 1
         self.app.apply_channel_count()
+        # The count is probed on the worker and the columns follow when it lands.
+        self.assertTrue(self.app.wait_for_instrument())
         self.assertTrue(self.app._channel_frames[1].winfo_manager())
         self.assertFalse(self.app._channel_frames[2].winfo_manager())
         self.assertEqual(("CH1",), self.measurement_sources())
@@ -147,6 +149,7 @@ class ChannelHidingTests(PanelTestCase):
     def test_second_channel_column_returns_for_a_two_channel_instrument(self):
         self.scope.get_channel_count.return_value = 2
         self.app.apply_channel_count()
+        self.assertTrue(self.app.wait_for_instrument())
         self.assertTrue(self.app._channel_frames[1].winfo_manager())
         self.assertTrue(self.app._channel_frames[2].winfo_manager())
         self.assertEqual(("CH1", "CH2"), self.measurement_sources())
@@ -164,6 +167,7 @@ class ChannelHidingTests(PanelTestCase):
         self.app.timebase_offset.delete(0, "end")
         self.app.timebase_offset.insert(0, "2")
         self.app.set_timebase_position()
+        self.assertTrue(self.app.wait_for_instrument())
         self.scope.set_timebase_offset.assert_called_once_with("1ms")
         self.assertAlmostEqual(self.app._horizontal_position, 1e-3)
 
@@ -172,6 +176,7 @@ class ChannelHidingTests(PanelTestCase):
         self.app.trigger_level.insert(0, "0.75")
         self.app.set_trigger_level()
         self.assertAlmostEqual(self.app._trigger_level_v, 0.75)
+        self.assertTrue(self.app.wait_for_instrument())
         self.scope.set_edge_trigger_level.assert_called_once_with(0.75)
 
     def test_position_shows_above_the_x_axis(self):
@@ -267,6 +272,7 @@ class MultimeterPanelTests(PanelTestCase):
         self.scope.get_dmm_reading.return_value = 1.2345
         self.app._dmm_caption = "V DC"
         self.app.poll_dmm()
+        self.assertTrue(self.app.wait_for_instrument())
         self.assertEqual("1.2345 V DC", self.app.dmm_value.get())
 
     def test_relative_is_shown_beside_the_reading(self):
@@ -274,18 +280,21 @@ class MultimeterPanelTests(PanelTestCase):
         self.app._dmm_caption = "V DC"
         self.app.dmm_relative.set(True)
         self.app.poll_dmm()
+        self.assertTrue(self.app.wait_for_instrument())
         self.assertEqual("REL 0.0000 V DC", self.app.dmm_value.get())
 
     def test_a_nonsense_reply_never_reaches_the_display(self):
         from unittest.mock import Mock
         self.scope.get_dmm_reading.return_value = Mock()
         self.app.poll_dmm()
+        self.assertTrue(self.app.wait_for_instrument())
         self.assertEqual("—", self.app.dmm_value.get())
 
     def test_a_disconnected_multimeter_shows_nothing(self):
         self.scope.get_dmm_reading.reset_mock()
         self.scope.is_connected = False
         self.app.poll_dmm()
+        self.assertTrue(self.app.wait_for_instrument())
         self.assertEqual("—", self.app.dmm_value.get())
         self.scope.get_dmm_reading.assert_not_called()
 
@@ -335,6 +344,7 @@ class MultimeterPanelTests(PanelTestCase):
         self.scope.get_dmm_function.return_value = ("VOLTage", "DC")
         self.scope.get_dmm_relative.return_value = False
         self.app.sync_dmm()
+        self.assertTrue(self.app.wait_for_instrument())
         self.assertEqual("VOLT", self.app.dmm_function.get())
         self.assertEqual("DC", self.app.dmm_type.get())
         self.assertEqual("V DC", self.app._dmm_caption)
@@ -387,15 +397,14 @@ class LiveCaptureTests(PanelTestCase):
     """The live loop asks for the fast capture; a manual one asks for a fresh header."""
 
     def capture_with(self, **kwargs):
-        import queue
-        import time
+        """Ask for a capture, then let the instrument worker hand it over.
+
+        The app no longer returns a frame from the call: the work happens off the
+        Tk thread and the result is applied when it lands, so a test drives that
+        same path rather than a parallel one.
+        """
         self.app.download_waveform(**kwargs)
-        for _ in range(100):
-            try:
-                return self.app._results.get_nowait()
-            except queue.Empty:
-                time.sleep(0.02)
-        raise AssertionError("the capture never reported back")
+        self.assertTrue(self.app.wait_for_instrument(), "the capture never reported back")
 
     def test_live_frames_reuse_the_header(self):
         # Reusing the header is the fast path; the volts still get calibrated on
@@ -635,11 +644,7 @@ class AutoFrameButtonTests(PanelTestCase):
         self.scope.auto_frame.return_value = {"applied": ["timebase"], "timebase": "200us",
                                              "notes": ["a note"], "trigger_level": None}
         self.app.action(self.app.auto_frame)
-        for _ in range(200):
-            self.root.update()
-            time.sleep(0.01)
-            if not self.app._busy:
-                break
+        self.assertTrue(self.app.wait_for_instrument())
         self.assertFalse(self.app._busy)
         log = self.app.log_text.get("1.0", "end")
         self.assertIn("AUTO set time/div 200us", log)
@@ -651,11 +656,7 @@ class AutoFrameButtonTests(PanelTestCase):
                                              "timebase": "200us", "trigger_level": "481mV",
                                              "trigger_level_readback": "480mV", "notes": []}
         self.app.action(self.app.auto_frame)
-        for _ in range(200):
-            self.root.update()
-            time.sleep(0.01)
-            if not self.app._busy:
-                break
+        self.assertTrue(self.app.wait_for_instrument())
         self.assertEqual("200us", self.app._vars["timebase_scale"].get())
         self.assertEqual("0.48", self.app.trigger_level.get())
 
@@ -666,32 +667,20 @@ class AutoFrameButtonTests(PanelTestCase):
                                              "trigger_level_readback": "4293V", "notes": []}
         before = self.app.trigger_level.get()
         self.app.action(self.app.auto_frame)
-        for _ in range(200):
-            self.root.update()
-            time.sleep(0.01)
-            if not self.app._busy:
-                break
+        self.assertTrue(self.app.wait_for_instrument())
         self.assertEqual(before, self.app.trigger_level.get())
         self.scope.set_edge_trigger_level.assert_not_called()
 
     def test_an_auto_that_changed_nothing_says_so(self):
         self.scope.auto_frame.return_value = {"applied": [], "notes": []}
         self.app.action(self.app.auto_frame)
-        for _ in range(200):
-            self.root.update()
-            time.sleep(0.01)
-            if not self.app._busy:
-                break
+        self.assertTrue(self.app.wait_for_instrument())
         self.assertIn("AUTO could not change anything", self.app.log_text.get("1.0", "end"))
 
     def test_a_failing_auto_releases_the_panel_and_logs_it(self):
         self.scope.auto_frame.side_effect = RuntimeError("transport went away")
         self.app.action(self.app.auto_frame)
-        for _ in range(200):
-            self.root.update()
-            time.sleep(0.01)
-            if not self.app._busy:
-                break
+        self.assertTrue(self.app.wait_for_instrument())
         self.assertFalse(self.app._busy)
         self.assertIn("transport went away", self.app.log_text.get("1.0", "end"))
 
@@ -707,6 +696,9 @@ class MeasurementPanelTests(PanelTestCase):
 
     def read(self):
         self.app.get_measurements()
+        # The instrument's block is read on the worker and written when it lands,
+        # which is after the request returns.
+        self.assertTrue(self.app.wait_for_instrument())
         return self.app.measurement_text.get("1.0", "end")
 
     def test_the_calibrated_capture_figures_are_shown_first(self):
@@ -976,6 +968,8 @@ class ConnectionFieldTests(PanelTestCase):
         self.scope.connect_usb.return_value = True
         self.scope.get_idn.return_value = "OWON,HDS271,25520161,V1.3.0"
         self.app.connect_scope()
+        # The transport is opened on the worker, so the call is made a moment later.
+        self.assertTrue(self.app.wait_for_instrument())
         self.scope.connect_usb.assert_called_once_with("auto", 115200)
 
 

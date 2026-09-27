@@ -49,6 +49,7 @@ class FrontPanelTests(unittest.TestCase):
                              lambda: self.app.set_channel_scale(1, self.app.ch1_scale.get()))
         self.scope.set_channel_scale.assert_not_called()
         self.app.step_number("trigger_level", 1, self.app.set_trigger_level)
+        self.assertTrue(self.app.wait_for_instrument())
         self.scope.set_edge_trigger_level.assert_called_once_with(1)
         self.scope.is_connected = False
         before = self.app.timebase_scale.get()
@@ -63,10 +64,12 @@ class FrontPanelTests(unittest.TestCase):
         self.scope.framing_signature = Mock(
             return_value=("500mv", "10X", "1ms"))
         self.app.watch_framing()
+        self.assertTrue(self.app.wait_for_instrument())
         self.scope.invalidate_capture_header.assert_not_called()
 
         self.scope.framing_signature = Mock(return_value=("5v", "10X", "1ms"))
         self.app.watch_framing()
+        self.assertTrue(self.app.wait_for_instrument())
         self.scope.invalidate_capture_header.assert_called_once_with()
         self.assertEqual("5v", self.app.ch1_scale.get())
         self.assertIn("framing changed", self.app.log_text.get("1.0", "end"))
@@ -83,7 +86,7 @@ class FrontPanelTests(unittest.TestCase):
                  voltage_per_point=10, point_interval=1)]
         self.scope.download_waveform_data.return_value = True
         self.app.download_waveform()
-        self.pump(lambda: not self.app._busy)
+        self.assertTrue(self.app.wait_for_instrument())
         self.assertEqual(self.app.capture_state.get(), "CAPTURED")
         self.assertEqual(self.app.ax.lines[0].get_color(), "#26d7e8")
         self.assertEqual(len(self.app.ax.lines[0].get_xdata()), 4)
@@ -106,17 +109,17 @@ class FrontPanelTests(unittest.TestCase):
         self.pump(lambda: not self.app._busy)
         self.assertIsNone(self.app._live_timer)
 
-    def test_busy_controls_do_not_send_commands(self):
+    def test_controls_still_act_while_a_capture_is_in_flight(self):
+        # The reverse of what this used to assert. Refusing every control while a
+        # capture ran made the panel read as unresponsive for half of every second
+        # during live acquisition; now the press is taken and the instrument is
+        # asked from the worker, which is what a real front panel does.
         self.app._busy = True
-        before = self.app.ch1_scale.get()
-        self.app.ch1_scale.set("2v")
-        self.app.ch1_scale.event_generate("<<ComboboxSelected>>")
-        self.assertEqual(before, self.app.ch1_scale.get())
         self.app.ch1_display.set(False)
         self.app.toggle_channel(1, self.app.ch1_display)
-        self.assertTrue(self.app.ch1_display.get())
-        self.scope.set_channel_scale.assert_not_called()
-        self.scope.set_channel_display.assert_not_called()
+        self.assertFalse(self.app.ch1_display.get())
+        self.assertTrue(self.app.wait_for_instrument())
+        self.scope.set_channel_display.assert_called_once_with(1, False)
         self.app._busy = False
 
     def test_drawer_and_layout(self):

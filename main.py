@@ -11,7 +11,7 @@ import tkinter as tk
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-from modern_lab import ModernLabUI
+from modern_lab import PRIORITY_REFRESH, ModernLabUI
 import os
 
 import analysis
@@ -68,6 +68,8 @@ class App(ModernLabUI):
         #: codes, where the coarser setting would have clipped it - so the volts/div
         #: control that has to work is the one this app draws with.
         self._display_scale = {}
+        #: The panel's own vertical position per channel, in volts at the input.
+        self._display_offset = {}
         self._display_scale_is_auto = {}
         #: The probe convention the trace is SHOWN in, per channel. Unset means the
         #: instrument's own, and the trace is then drawn in tip volts.
@@ -173,40 +175,77 @@ class App(ModernLabUI):
         port_text = getattr(self, "conn_port", None)
         port_value = port_text.get().strip() if port_text is not None else ""
 
+        # The address box is not on screen for USB, and the instrument is found by
+        # VID/PID (HDS) or auto-detected as a COM port (serial models), so nothing
+        # typed for LAN can steer this. Which of several attached scopes to open IS
+        # steerable, and that is the serial from the setup - worth having, because
+        # the HID endpoint takes one owner at a time and opening the wrong
+        # instrument looks like no scope.
+        chosen = self.setup.usb_serial
+        attached = attached_scopes()
+        if conn_type == "usb" and len(attached) > 1:
+            self.log("%d OWON USB devices attached; using %s. Pick one in SETUP."
+                     % (len(attached), chosen or "the first found"))
         try:
-            if conn_type == "usb":
-                baudrate = int(port_value) if port_value else 115200
-                # The address box is not on screen for USB, and the instrument is
-                # found by VID/PID (HDS) or auto-detected as a COM port (serial
-                # models), so nothing typed for LAN can steer this. Which of several
-                # attached scopes to open IS steerable, and that is the serial from
-                # the setup - worth having, because the HID endpoint takes one owner
-                # at a time and opening the wrong instrument looks like no scope.
-                chosen = self.setup.usb_serial
-                attached = attached_scopes()
-                if len(attached) > 1:
-                    self.log("%d OWON USB devices attached; using %s. Pick one in SETUP."
-                             % (len(attached), chosen or "the first found"))
-                if chosen and getattr(self.scope, "is_hds", False):
-                    success = self.scope.connect_usb_hid(serial=chosen)
-                    if success:
-                        self.scope.identify_model()
-                else:
-                    success = self.scope.connect_usb("auto", baudrate)
-            else:
-                port = int(port_value) if port_value else 3000
-                success = self.scope.connect_lan(address or "10.1.1.131", port)
+            baudrate = int(port_value) if port_value else 115200
+            port = int(port_value) if port_value else 3000
         except ValueError:
             messagebox.showerror("Connection Error", "Invalid port or baud rate")
             return
 
-        if not success:
-            messagebox.showerror("Connection Error", f"Failed to connect via {conn_type.upper()}")
+        # Opening the transport happens on the worker, like every other call. It is
+        # not instant: a USB probe that has to try several ports takes seconds, and
+        # on a button press that was seconds of a window that would not answer.
+        self._set_status("Connecting\u2026")
+        self.connect_btn.config(text="Connecting\u2026", state="disabled")
+        self.report_later("connect",
+                          lambda scope: self.open_transport(scope, conn_type, chosen,
+                                                            baudrate, address, port),
+                          lambda answer, error=None: self.finish_connect(conn_type, answer, error))
+
+    @staticmethod
+    def open_transport(scope, conn_type, chosen, baudrate, address, port):
+        """Open the transport and ask the instrument what it is. On the worker.
+
+        Returns (opened, what it said). The *IDN? is made here rather than after the
+        hand-over because it is another round trip, and its answer is what the panel
+        shows as the device.
+        """
+        if conn_type == "usb":
+            if chosen and getattr(scope, "is_hds", False):
+                opened = scope.connect_usb_hid(serial=chosen)
+                if opened:
+                    scope.identify_model()
+            else:
+                opened = scope.connect_usb("auto", baudrate)
+        else:
+            opened = scope.connect_lan(address or "10.1.1.131", port)
+        if not opened:
+            return False, ""
+        try:
+            return True, (scope.get_idn() or "")
+        except Exception:
+            # Connected but unwilling to identify itself: keep the connection and
+            # let the other reads fill the panel in.
+            return True, ""
+
+    def finish_connect(self, conn_type, answer, error=None):
+        """Wire the panel up to the instrument that answered, or say that it did not."""
+        self.connect_btn.config(state="normal")
+        opened, idn = (answer if isinstance(answer, tuple) else (bool(answer), ""))
+        if error is not None or not opened:
+            self.connect_btn.config(text="Connect")
+            if error is not None:
+                self.log(f"Connection failed: {error}", "ERROR")
+                messagebox.showerror("Connection Error",
+                                     f"Failed to connect via {conn_type.upper()}\n{error}")
+            else:
+                messagebox.showerror("Connection Error",
+                                     f"Failed to connect via {conn_type.upper()}")
             self._set_status("Connection failed")
             return
 
         self.connect_btn.config(text="Disconnect")
-        idn = self.scope.get_idn()
         # What this instrument is decides which calibration applies to it. On the
         # USB path the model has just been read from *IDN?; on a transport that has
         # not identified itself yet this does nothing rather than guessing.
@@ -236,8 +275,8 @@ class App(ModernLabUI):
     # Instrument commands
     def set_channel_display(self, channel, state):
         if self._is_connected():
-            self.scope.set_channel_display(channel, state)
-            self.log(f"CH{channel} display -> {'ON' if state else 'OFF'}")
+            self.tell_scope("CH%d display -> %s" % (channel, "ON" if state else "OFF"),
+                            lambda scope, c=channel, s=state: scope.set_channel_display(c, s))
 
     def set_channel_scale(self, channel, scale):
         """Set the volts one row of the grid is worth - the software's display scale.
@@ -266,8 +305,8 @@ class App(ModernLabUI):
 
     def set_channel_coupling(self, channel, coupling):
         if self._is_connected():
-            self.scope.set_channel_coupling(channel, coupling)
-            self.log(f"CH{channel} coupling -> {coupling}")
+            self.tell_scope("CH%d coupling -> %s" % (channel, coupling),
+                            lambda scope, c=channel, k=coupling: scope.set_channel_coupling(c, k))
 
     def set_channel_probe(self, channel, probe):
         """Record the probe in use. It does not scale this instrument's amplitudes.
@@ -288,14 +327,37 @@ class App(ModernLabUI):
         self.plot_waveform()
 
     def set_channel_offset(self, channel, offset):
-        if self._is_connected():
-            self._framing_is_front_panel_only(channel, "position", offset)
-            self.sync_vertical_controls()
+        """Move this trace up and down in the view, in volts at the input.
+
+        Not a write to the instrument, for the reason the scale control is not one:
+        a vertical write is accepted, not acted on, and leaves the instrument's own
+        readings out of step with its gain. So the position moves the drawing - a
+        row of the grid stays the volts/div it was, and the trace moves up by the
+        volts given - while the instrument's own position is set on its keys.
+
+        This used to call a method that does not exist, so every press raised
+        inside a Tk callback: the control did nothing on screen and the sync behind
+        it never ran, which is what "the panel stops answering" looks like from
+        the outside.
+        """
+        if not self._is_connected():
+            return
+        try:
+            value = float(offset)
+        except (TypeError, ValueError):
+            self.log("CH%d position: %r is not a number; the trace was left where it "
+                     "is." % (channel, offset), "WARNING")
+            return
+        self._display_offset[channel] = value
+        self.log("CH%d position: %+.3g V in this view. The instrument's own vertical "
+                 "position is set on its front panel." % (channel, value))
+        self.plot_waveform()
 
     def set_timebase(self):
         if self._is_connected():
-            self.scope.set_timebase_scale(self.timebase_scale.get())
-            self.log(f"Timebase -> {self.timebase_scale.get()}")
+            wanted = self.timebase_scale.get()
+            self.tell_scope("Timebase -> %s" % wanted,
+                            lambda scope, value=wanted: scope.set_timebase_scale(value))
 
     def set_timebase_offset(self):
         if self._is_connected():
@@ -332,27 +394,31 @@ class App(ModernLabUI):
             return
         seconds = divisions * scale
         self._horizontal_position = seconds
-        self.scope.set_timebase_offset(self.timebase_position_text(seconds))
-        self.log("Horizontal position -> %g div (%s)" % (divisions, self.timebase_position_text(seconds)))
+        text = self.timebase_position_text(seconds)
+        self.tell_scope("Horizontal position -> %g div (%s)" % (divisions, text),
+                        lambda scope, value=text: scope.set_timebase_offset(value))
         if self.scope.waveform_data.channels:
             self.plot_waveform()
 
     def set_trigger_mode(self):
         if self._is_connected():
-            self.scope.set_trigger_mode(self.trigger_mode.get())
-            self.log(f"Trigger mode -> {self.trigger_mode.get()}")
+            wanted = self.trigger_mode.get()
+            self.tell_scope("Trigger mode -> %s" % wanted,
+                            lambda scope, value=wanted: scope.set_trigger_mode(value))
 
     def set_trigger_source(self):
         if self._is_connected():
-            handler = getattr(self.scope, "set_edge_trigger_source", self.scope.set_trigger_source)
-            handler(self.trigger_source.get())
-            self.log(f"Trigger source -> {self.trigger_source.get()}")
+            wanted = self.trigger_source.get()
+            self.tell_scope("Trigger source -> %s" % wanted,
+                            lambda scope, value=wanted: getattr(
+                                scope, "set_edge_trigger_source", scope.set_trigger_source)(value))
 
     def set_trigger_slope(self):
         if self._is_connected():
-            handler = getattr(self.scope, "set_edge_trigger_slope", self.scope.set_trigger_slope)
-            handler(self.trigger_slope.get())
-            self.log(f"Trigger slope -> {self.trigger_slope.get()}")
+            wanted = self.trigger_slope.get()
+            self.tell_scope("Trigger slope -> %s" % wanted,
+                            lambda scope, value=wanted: getattr(
+                                scope, "set_edge_trigger_slope", scope.set_trigger_slope)(value))
 
     def set_trigger_level(self):
         if self._is_connected():
@@ -363,25 +429,30 @@ class App(ModernLabUI):
                 self._trigger_level_v = float(numeric)
             except Exception:
                 pass
-            handler = getattr(self.scope, "set_edge_trigger_level", self.scope.set_trigger_level)
-            handler(value)
-            self.log(f"Trigger level -> {self.trigger_level.get()}")
+            self.tell_scope("Trigger level -> %s" % self.trigger_level.get(),
+                            lambda scope, value=value: getattr(
+                                scope, "set_edge_trigger_level", scope.set_trigger_level)(value))
             if self.scope.waveform_data.channels:
                 self.plot_waveform()
 
     def set_acquire_type(self):
         if self._is_connected():
-            self.scope.set_acquire_type(self.acq_type.get())
-            self.log(f"Acquire type -> {self.acq_type.get()}")
+            wanted = self.acq_type.get()
+            self.tell_scope("Acquisition -> %s" % wanted,
+                            lambda scope, value=wanted: scope.set_acquire_type(value))
 
     def set_acquire_average(self):
         if self._is_connected():
-            self.scope.set_acquire_average(self.acq_average.get())
+            wanted = self.acq_average.get()
+            self.tell_scope("Average count -> %s" % wanted,
+                            lambda scope, value=wanted: scope.set_acquire_average(value))
             self.log(f"Average count -> {self.acq_average.get()}")
 
     def set_memory_depth(self):
         if self._is_connected():
-            self.scope.set_memory_depth(self.mem_depth.get())
+            wanted = self.mem_depth.get()
+            self.tell_scope("Memory depth -> %s" % wanted,
+                            lambda scope, value=wanted: scope.set_memory_depth(value))
             self.log(f"Memory depth -> {self.mem_depth.get()}")
 
     # ------------------------------------------------------------------
@@ -400,28 +471,53 @@ class App(ModernLabUI):
         return ("%s %s" % (self.DMM_UNITS.get(function or "", ""), subtype or "")).strip()
 
     def sync_dmm(self):
-        """Read the multimeter's function and relative state from the instrument."""
+        """Ask for the multimeter's function and relative state.
+
+        Three round trips, so they are read on the worker and the panel is filled
+        in when they arrive - each reading failing on its own, which is how this
+        subsystem has to be treated: it answers some queries and is silent for
+        others on the same instrument.
+        """
         if not self._is_connected():
             return
-        report = {}
+        self.report_later("dmm_state", self.read_dmm_state, self.apply_dmm_state)
+
+    @staticmethod
+    def read_dmm_state(scope):
+        """Everything the multimeter panel mirrors. Runs on the worker."""
+        state = {"report": {}, "function": None, "subtype": None,
+                 "relative": None, "errors": []}
         try:
-            report = self.scope.dmm_capabilities(refresh=True) or {}
+            state["report"] = scope.dmm_capabilities(refresh=True) or {}
         except Exception as exc:
-            self.log(f"Multimeter probe failed: {exc}", "ERROR")
-        function, subtype = None, None
+            state["errors"].append("Multimeter probe failed: %s" % exc)
         try:
-            function, subtype = self.scope.get_dmm_function()
+            state["function"], state["subtype"] = scope.get_dmm_function()
         except Exception as exc:
-            self.log(f"Multimeter state failed: {exc}", "ERROR")
+            state["errors"].append("Multimeter state failed: %s" % exc)
+        try:
+            state["relative"] = scope.get_dmm_relative()
+        except Exception as exc:
+            state["errors"].append("Multimeter relative state failed: %s" % exc)
+        return state
+
+    def apply_dmm_state(self, state, error=None):
+        """Put a multimeter readback on the panel."""
+        if error is not None:
+            self.log("Multimeter state failed: %s" % error, "ERROR")
+            return
+        state = state or {}
+        for message in state.get("errors") or []:
+            self.log(message, "ERROR")
+        report = state.get("report") or {}
+        function, subtype = state.get("function"), state.get("subtype")
         self._dmm_caption = self.dmm_caption(function, subtype)
         if function:
             self.dmm_function.set("VOLT" if function == "VOLTage" else "AMP")
             self.dmm_type.set(subtype or self.dmm_type.get())
-        try:
-            state = self.scope.get_dmm_relative()
-            self.dmm_relative.set(state is not False and state is not None)
-        except Exception as exc:
-            self.log(f"Multimeter relative state failed: {exc}", "ERROR")
+        relative = state.get("relative")
+        if relative is not None:
+            self.dmm_relative.set(relative is not False and relative is not None)
         silent = report.get("silent") if isinstance(report, dict) else None
         self.refresh_dmm_modes(report)
         if report and not report.get("reading"):
@@ -545,15 +641,22 @@ class App(ModernLabUI):
             self.log("Multimeter REL -> %s" % ("%g V" % state if engaged else "off"))
 
     def poll_dmm(self):
-        """Refresh the multimeter readout; one query is ~32 ms."""
+        """Ask for the multimeter readout; one query is ~32 ms on the worker.
+
+        Read on this thread it was a 32 ms freeze in the middle of live
+        acquisition, for a number that does not move quickly.
+        """
         if not self._is_connected():
             self.dmm_value.set("—")
             return
-        try:
-            reading = self.scope.get_dmm_reading()
-        except Exception as exc:
+        self.ask_scope("dmm", lambda scope: scope.get_dmm_reading(), coalesce=True,
+                       priority=PRIORITY_REFRESH)
+
+    def apply_dmm_reading(self, reading, error=None):
+        """Show a multimeter reading, or say why there is not one."""
+        if error is not None:
             self.dmm_value.set("—")
-            self.log(f"Multimeter read failed: {exc}", "ERROR")
+            self.log(f"Multimeter read failed: {error}", "ERROR")
             return
         if not isinstance(reading, (int, float)) or isinstance(reading, bool):
             self.dmm_value.set("—")
@@ -578,7 +681,7 @@ class App(ModernLabUI):
         if not self._is_connected():
             return
         if messagebox.askyesno("Reset scope", "Reset oscilloscope to defaults?"):
-            self.scope.reset()
+            self.tell_scope("Instrument reset", lambda scope: scope.reset())
             time.sleep(0.2)
             self.query_all_states()
             self.log("Scope reset")
@@ -656,8 +759,7 @@ class App(ModernLabUI):
 
     def auto_scale(self):
         if self._is_connected():
-            self.scope.auto_scale(True)
-            self.log("Auto scale enabled")
+            self.tell_scope("Auto scale enabled", lambda scope: scope.auto_scale(True))
 
     def auto_frame(self):
         """Front panel AUTO: search for the signal and frame it.
@@ -672,16 +774,10 @@ class App(ModernLabUI):
         self._auto_report = None
         self.capture_state.set("AUTO…")
         self.status_var.set("Searching for the signal and framing it…")
-
-        def worker():
-            try:
-                self._auto_report = self.scope.auto_frame()
-                self._results.put((True, None))
-            except Exception as exc:
-                self._auto_report = None
-                self._results.put((False, str(exc)))
-
-        self.start_worker(worker, "AUTO")
+        # On the worker like everything else: AUTO measures, decides and writes,
+        # which is several round trips. It used to post to a queue that only the
+        # capture path drained, so it could wait for a frame that never came.
+        self.ask_scope("autoset", lambda scope: scope.auto_frame())
 
     def report_auto_frame(self):
         """Log what AUTO actually changed, and anything it could not."""
@@ -730,73 +826,111 @@ class App(ModernLabUI):
     # ------------------------------------------------------------------
     # Query / visualization
     def query_all_states(self):
+        """Refresh the panel from the instrument.
+
+        A dozen reads, so they happen on the worker and the panel is filled in when
+        the answer lands. Read here, this froze the window for about a third of a
+        second - nothing on this panel reads the instrument on the Tk thread now.
+        """
         if not self._is_connected():
             return
+        self.status_var.set("Reading the instrument's settings…")
+        self.report_later("states", self.read_all_states, self.apply_all_states)
 
+    @staticmethod
+    def read_all_states(scope):
+        """Read every setting the panel mirrors. Runs on the worker.
+
+        Static, and touching no widget on purpose: the thread that calls this is
+        not the thread that made the widgets, and nothing here may reach them.
+        """
+        values = {
+            "timebase": scope.get_timebase_scale(),
+            "hpos": scope.get_horizontal_position_seconds(),
+            "channels": [],
+            "trigger": {"mode": scope.get_trigger_mode(),
+                        "source": scope.get_trigger_source(),
+                        "slope": scope.get_trigger_slope(),
+                        "level": scope.get_trigger_level()},
+            "acquire": {"type": scope.get_acquire_type(),
+                        "average": scope.get_acquire_average(),
+                        "memory": scope.get_memory_depth()},
+        }
+        for number in range(1, scope.get_channel_count() + 1):
+            values["channels"].append({
+                "number": number,
+                "scale": scope.get_channel_scale(number),
+                "coupling": scope.get_channel_coupling(number),
+                "display": scope.get_channel_display(number),
+                "probe": scope.get_channel_probe(number),
+            })
+        return values
+
+    def apply_all_states(self, values, error=None):
+        """Put a readback into the controls. Only what the instrument answered."""
+        if error is not None:
+            self.log(f"Query settings failed: {error}", "ERROR")
+            self.status_var.set("Could not read the instrument's settings")
+            return
         try:
-            tb_scale = self.scope.get_timebase_scale()
-            if tb_scale and tb_scale in self.scope.TIMEBASE_SCALES:
-                self.timebase_scale.set(tb_scale)
-            tb_offset = self.scope.get_horizontal_position_seconds()
-            tb_scale = self.scope.parse_scale(self.scope.get_timebase_scale() or "")
-            if tb_offset is not None:
-                self._horizontal_position = tb_offset
-                divisions = tb_offset / tb_scale if tb_scale else 0.0
+            scale = self.scope.parse_scale(values.get("timebase") or "")
+            if values.get("timebase") and values["timebase"] in self.scope.TIMEBASE_SCALES:
+                self.timebase_scale.set(values["timebase"])
+            position = values.get("hpos")
+            if position is not None and scale:
+                self._horizontal_position = position
                 self.timebase_offset.delete(0, tk.END)
-                self.timebase_offset.insert(0, "%g" % divisions)
+                self.timebase_offset.insert(0, "%g" % (position / scale))
 
-            for ch in range(1, self.scope.get_channel_count() + 1):
-                scale = self.scope.get_channel_scale(ch)
-                coupling = self.scope.get_channel_coupling(ch)
-                display = self.scope.get_channel_display(ch)
-                offset = self.scope.get_channel_offset(ch)
-                probe = self.scope.get_channel_probe(ch)
-                if scale and scale.lower() in self.scope.VOLTAGE_SCALES:
-                    getattr(self, f"ch{ch}_scale").set(scale.lower())
+            for channel in values.get("channels") or []:
+                number = channel.get("number")
+                entry = channel.get("scale")
+                if entry and str(entry).lower() in self.scope.VOLTAGE_SCALES:
+                    getattr(self, f"ch{number}_scale").set(str(entry).lower())
+                coupling = channel.get("coupling")
                 if coupling and coupling in self.scope.COUPLING_MODES:
-                    getattr(self, f"ch{ch}_coupling").set(coupling)
+                    getattr(self, f"ch{number}_coupling").set(coupling)
                 # Only when the instrument actually answered: the HDS does not
                 # implement :CHn:DISPlay?, and treating the empty reply as "off"
                 # would untick a channel that is plainly on screen.
+                display = channel.get("display")
                 if display not in (None, ""):
-                    getattr(self, f"ch{ch}_display").set(str(display).strip().upper() == "ON")
-                # The probe turns a volts/div figure into a real amplitude, so it
-                # is read back rather than left on a default the user would then
-                # write over. The scope answers "10X" where the list holds "X10".
-                token = str(probe or "").strip().upper()
+                    getattr(self, f"ch{number}_display").set(
+                        str(display).strip().upper() == "ON")
+                # The probe is read back rather than left on a default the user
+                # would then write over. The scope answers "10X" where the list
+                # holds "X10".
+                token = str(channel.get("probe") or "").strip().upper()
                 if token and not token.startswith("X"):
                     token = "X" + token.rstrip("X")
                 if token in self.scope.PROBE_ATTEN:
-                    getattr(self, f"ch{ch}_probe").set(token)
-                if offset not in (None, ""):
-                    entry = getattr(self, f"ch{ch}_offset")
-                    entry.delete(0, tk.END)
-                    entry.insert(0, str(offset))
+                    getattr(self, f"ch{number}_probe").set(token)
+                # The instrument's own vertical position is deliberately NOT pushed
+                # into the entry: that control applies whatever it holds, so a
+                # readback put there would come straight back as a write - and this
+                # family's position is a front-panel setting besides.
 
-            trig_mode = self.scope.get_trigger_mode()
-            if trig_mode and trig_mode in self.scope.TRIGGER_MODES:
-                self.trigger_mode.set(trig_mode)
-            trig_source = self.scope.get_trigger_source()
-            if trig_source and trig_source in self.scope.TRIGGER_SOURCES:
-                self.trigger_source.set(trig_source)
-            trig_slope = self.scope.get_trigger_slope()
-            if trig_slope and trig_slope in self.scope.TRIGGER_SLOPES:
-                self.trigger_slope.set(trig_slope)
-            trig_level = self.scope.get_trigger_level()
-            if trig_level not in (None, ""):
+            trigger = values.get("trigger") or {}
+            for key, attribute, choices in (
+                    ("mode", "trigger_mode", self.scope.TRIGGER_MODES),
+                    ("source", "trigger_source", self.scope.TRIGGER_SOURCES),
+                    ("slope", "trigger_slope", self.scope.TRIGGER_SLOPES)):
+                entry = trigger.get(key)
+                if entry and entry in choices:
+                    getattr(self, attribute).set(entry)
+            if trigger.get("level") not in (None, ""):
                 self.trigger_level.delete(0, tk.END)
-                self.trigger_level.insert(0, str(trig_level))
+                self.trigger_level.insert(0, str(trigger["level"]))
 
-            acq_type = self.scope.get_acquire_type()
-            if acq_type and acq_type in self.scope.ACQ_TYPES:
-                self.acq_type.set(acq_type)
-            avg = self.scope.get_acquire_average()
-            if avg and str(avg) in self.scope.AVG_COUNTS:
-                self.acq_average.set(str(avg))
-            memory = self.scope.get_memory_depth()
-            if memory and str(memory) in self.scope.MEMORY_DEPTHS:
-                self.mem_depth.set(str(memory))
+            acquire = values.get("acquire") or {}
+            if acquire.get("type") and acquire["type"] in self.scope.ACQ_TYPES:
+                self.acq_type.set(acquire["type"])
+            if acquire.get("average") and str(acquire["average"]) in self.scope.AVG_COUNTS:
+                self.acq_average.set(str(acquire["average"]))
+            if acquire.get("memory") and str(acquire["memory"]) in self.scope.MEMORY_DEPTHS:
+                self.mem_depth.set(str(acquire["memory"]))
             self.log("Settings refreshed")
+            self.status_var.set("Settings read from the instrument")
         except Exception as exc:
             self.log(f"Query settings failed: {exc}", "ERROR")
 
@@ -829,18 +963,37 @@ class App(ModernLabUI):
                     lines.append("  %s: %.4g %s" % (label, value, unit))
             lines.append("")
 
-        payload = self.scope.get_all_measurements(channel)
-        lines.append("From the instrument (referred to its own volts/div and probe labels):")
-        if isinstance(payload, dict) and payload:
-            lines.extend("  %s: %s" % (key, value) for key, value in sorted(payload.items()))
-        else:
-            lines.append("  " + str(payload))
+        lines.append("From the instrument (referred to its own volts/div and probe "
+                     "labels): reading…")
+        self.write_measurement_text(channel, lines)
+        # The instrument's block is another set of queries: read on the worker, and
+        # written under the figures already on screen when it arrives.
+        self.report_later("measurements",
+                          lambda scope: scope.get_all_measurements(channel),
+                          lambda payload, error, ch=channel, before=lines:
+                          self.apply_instrument_measurements(ch, before, payload, error))
 
+    def write_measurement_text(self, channel, lines):
+        """Show the measurement lines, and keep the log honest about where they came from."""
         text = "\n".join(lines)
         self.measurement_text.delete("1.0", tk.END)
         self.measurement_text.insert(tk.END, text + "\n")
         self.measurement_text.see(tk.END)
-        self.log(f"Measurements read from CH{channel}")
+        self.log("Measurements read from CH%d" % channel)
+
+    def apply_instrument_measurements(self, channel, lines, payload, error=None):
+        """Add the instrument's own block under the figures from the capture."""
+        body = list(lines)
+        if isinstance(body, list) and body and body[-1].endswith("reading…"):
+            body.pop()
+        body.append("From the instrument (referred to its own volts/div and probe labels):")
+        if error is not None:
+            body.append("  could not be read: %s" % error)
+        elif isinstance(payload, dict) and payload:
+            body.extend("  %s: %s" % (key, value) for key, value in sorted(payload.items()))
+        else:
+            body.append("  " + str(payload))
+        self.write_measurement_text(channel, body)
 
     @staticmethod
     def time_axis_units(span_seconds):
@@ -1008,6 +1161,15 @@ class App(ModernLabUI):
             return instrument
         return WaveformData._probe_factor(self.scope.get_channel_probe(channel)) or 1.0
 
+    def display_offset(self, number):
+        """This channel's vertical position in the view, in volts at the input.
+
+        The panel's control, not the instrument's: it moves the drawing and leaves
+        the volts per code and the grid alone, so a trace can be moved off a cursor
+        without changing a single amplitude reading.
+        """
+        return (getattr(self, "_display_offset", {}) or {}).get(number, 0.0)
+
     def display_ratio(self, number, entry):
         """Displayed volts per volt read: always 1.0 on this instrument.
 
@@ -1074,7 +1236,10 @@ class App(ModernLabUI):
             if not volts_per_div or not samples or channel.get("units") != "V":
                 continue
             half = (HDS_VERTICAL_DIVISIONS / 2.0) * volts_per_div
-            spans.append((-half, half))
+            # A trace the user has moved must still be on screen: the frame covers
+            # the whole grid plus wherever the position control has put the trace.
+            offset = self.display_offset(number)
+            spans.append((-half + offset, half + offset))
             note = ""
             claim = channel.get("volts_per_div")
             decoded = channel.get("true_volts_per_div")
@@ -1414,18 +1579,42 @@ class App(ModernLabUI):
         is_query = "?" in command
         if not is_query and not allow_writes:
             return "refused: that looks like a write. Tick 'Allow writes' if you mean it."
+        # A command is a round trip - 32 ms for a text query, far more for a capture
+        # - so it goes to the worker and the console prints the reply when it lands.
+        # Sent from here it froze the window for as long as the instrument took.
+        work = (lambda scope: scope.query(command)) if is_query else \
+               (lambda scope: scope.send_command(command))
+        self.report_later("console", work,
+                          lambda value, error, sent=command: self.deliver_scpi_reply(sent, value, error))
+        return "sent: %s" % command
+
+    def console_reply(self, text):
+        """Hand a late reply to the console, if one is still open."""
+        sink = getattr(self, "_console_sink", None)
+        if sink is None:
+            return
         try:
-            reply = self.scope.query(command) if is_query else self.scope.send_command(command)
-        except Exception as exc:
-            self.log("SCPI %s failed: %s" % (command, exc), "ERROR")
-            return "failed: %s" % exc
+            sink(text)
+        except tk.TclError:
+            self._console_sink = None
+
+    def deliver_scpi_reply(self, command, reply, error=None):
+        """Print what the instrument said, or why there is nothing to print."""
+        if error is not None:
+            self.log("SCPI %s failed: %s" % (command, error), "ERROR")
+            self.console_reply("SCPI %s failed: %s" % (command, error))
+            return
         answer = "" if reply is None else str(reply).strip()
         self.log("SCPI %s \u2192 %s" % (command, answer or "(no reply)"))
-        return answer or "(no reply)"
+        self.console_reply(answer or "(no reply)")
 
-    def trigger_state_rows(self):
-        """What the instrument says about its trigger and framing, read one node at a time."""
-        scope = self.scope
+    @staticmethod
+    def read_trigger_rows(scope):
+        """What the instrument says about its trigger and framing, one node at a time.
+
+        Runs on the worker: twelve queries are about a third of a second, which is
+        a third of a second the window cannot repaint if they happen here.
+        """
         rows = []
         for label, getter in (
             ("Trigger mode", scope.get_trigger_mode),
@@ -1453,14 +1642,30 @@ class App(ModernLabUI):
                                            "the instrument, or try it in the SCPI console"))
         rows.append(("Self correction", "on the instrument: UTILITY \u2192 Self Correct. It takes "
                                         "minutes and must not be interrupted."))
+        return rows
+
+    def capture_rows(self):
+        """What the capture itself says - already in memory, so no instrument call."""
+        rows = []
         for channel in self.capture_channels():
-            rows.append(("Captured %s scale" % str(channel.get("name", "CH1")).upper(),
-                         channel.get("volts_per_div")))
-            rows.append(("Captured %s points" % str(channel.get("name", "CH1")).upper(),
-                         len(channel.get("waveform_data") or [])))
-            rows.append(("Captured %s interval" % str(channel.get("name", "CH1")).upper(),
+            name = str(channel.get("name", "CH1")).upper()
+            rows.append(("Captured %s scale" % name, channel.get("volts_per_div")))
+            rows.append(("Captured %s points" % name, len(channel.get("waveform_data") or [])))
+            rows.append(("Captured %s interval" % name,
                          analysis.format_seconds(analysis.point_interval(channel))))
         return rows
+
+    def trigger_state_rows(self, deliver):
+        """Ask for the trigger readout, and add what the capture already knows.
+
+        The instrument's rows are read on the worker; the rows describing the
+        capture are drawn from memory on this side, so the dialog gets one list
+        instead of waiting on a second round trip for numbers it already has.
+        """
+        def finish(rows, error=None):
+            deliver(list(rows or []) + self.capture_rows(), error)
+
+        self.report_later("readout", self.read_trigger_rows, finish)
 
     def refresh_trigger_state(self):
         self.log("Trigger and acquisition state read back.")
@@ -1476,35 +1681,69 @@ class App(ModernLabUI):
         if not self._is_connected():
             self.status_var.set("Connect the instrument first")
             return None
+        self.status_var.set("Framing the time base from the signal…")
+        self.report_later("autoset_time", self.read_autoset_target, self.apply_software_autoset)
+
+    @staticmethod
+    def read_autoset_target(scope):
+        """Measure, decide a time/div, write it, and read it back. On the worker.
+
+        All of it is instrument work - the measurement block, the ladder lookup and
+        the one framing write this interface can actually make - and none of it
+        touches a widget, which is what lets it run off the Tk thread.
+        """
+        report = {"frequency": None, "target": None, "requested": None,
+                  "readback": None, "notes": []}
         try:
-            measurements = self.scope.get_measurements_numeric(1) or {}
+            measurements = scope.get_measurements_numeric(1) or {}
         except Exception as exc:
-            self.log("Autoset could not read the measurements: %s" % exc, "ERROR")
-            return None
+            report["notes"].append("Autoset could not read the measurements: %s" % exc)
+            return report
         frequency = measurements.get("frequency")
+        report["frequency"] = frequency
         if not frequency:
-            self.log("Autoset: the instrument reports no frequency for CH1, "
-                     "so there is nothing to frame the time axis on.")
-            return None
+            report["notes"].append("Autoset: the instrument reports no frequency for CH1, "
+                                   "so there is nothing to frame the time axis on.")
+            return report
         target = analysis.timebase_for(frequency)
+        report["target"] = target
         if target is None:
-            return None
+            return report
         try:
-            self.scope.set_timebase_scale(self.scope.nearest_timebase(target))
+            requested = scope.nearest_timebase(target)
+            scope.set_timebase_scale(requested)
+            report["requested"] = requested
         except Exception as exc:
-            self.log("Autoset could not set the timebase: %s" % exc, "ERROR")
-            return None
-        readback = None
+            report["notes"].append("Autoset could not set the timebase: %s" % exc)
+            return report
         try:
-            readback = self.scope.get_timebase_scale()
+            report["readback"] = scope.get_timebase_scale()
         except Exception:
-            readback = None
+            report["readback"] = None
+        return report
+
+    def apply_software_autoset(self, report, error=None):
+        """Say what AUTO changed, what is left for the front panel, and recapture."""
+        if error is not None:
+            self.log("Autoset failed: %s" % error, "ERROR")
+            self.status_var.set("Autoset failed")
+            return None
+        report = report or {}
+        for note in report.get("notes") or []:
+            self.log(note, "ERROR")
+        if not report.get("frequency"):
+            self.status_var.set("Autoset found no frequency to frame on")
+            return None
+        if not report.get("target") or not report.get("requested"):
+            return None
         self.log("Autoset: %s measured, timebase set to %s (reads back %s). "
                  "Press AUTO on the instrument for the vertical - the volts/div write "
-                 "is inert on this unit." % (analysis.format_hz(frequency),
-                                             analysis.format_seconds(target), readback))
+                 "is inert on this unit." % (analysis.format_hz(report["frequency"]),
+                                             analysis.format_seconds(report["target"]),
+                                             report.get("readback")))
+        self.status_var.set("Time base framed from the signal")
         self.download_waveform()
-        return target
+        return report["target"]
 
     # ------------------------------------------------------------------
     # Unattended recording
@@ -1546,15 +1785,14 @@ class App(ModernLabUI):
         folder = (getattr(self.setup, "record_folder", "") or "").strip()
         name = time.strftime("capture-%Y%m%d-%H%M%S", time.localtime())
         path = os.path.join(folder, "%s-%04d.csv" % (name, self._records))
-        try:
-            waveform_export.write_csv(path, channels, self.provenance_block())
-        except OSError as exc:
-            self.recording = False
-            self.record_label.set("stopped: %s" % exc)
-            self.log("Recording stopped: %s" % exc, "ERROR")
-            return None
+        provenance = self.provenance_block()
         self._records += 1
-        self.record_label.set("%d file(s) written" % self._records)
+        # Written on the worker, because the folder may be a network share and a
+        # frame does not wait for a file. A write that fails still stops the
+        # recording, which is the point of leaving it running unattended.
+        self.ask_scope("record",
+                       lambda scope: waveform_export.write_csv(path, channels, provenance),
+                       priority=PRIORITY_REFRESH)
         return path
 
     def provenance_block(self):
@@ -1618,6 +1856,9 @@ class App(ModernLabUI):
             number = self.channel_number(channel)
             if number:
                 y = y * self.display_ratio(number, channel)
+                # The panel's vertical position, in the same volts the axis is
+                # drawn in, so the trace moves and the grid does not.
+                y = y + self.display_offset(number)
             x = np.arange(y.size, dtype=float) * float(channel.get("point_interval", 1.0) or 1.0) * factor
             self.ax.plot(x, y, color=color, linewidth=1.4)
             plotted = True
@@ -1645,25 +1886,79 @@ class App(ModernLabUI):
         self._plot_cache = channels
         self.sync_vertical_controls()
 
-    def refresh_cursors(self):
-        """Read back the two values the plot annotates.
+    def on_instrument_result(self, kind, token, value, error):
+        """Apply a finished instrument call. Runs on the UI thread, never blocks."""
+        deliver = getattr(self, "_deliveries", {}).pop(token, None)
+        if deliver is not None:
+            try:
+                deliver(value, error)
+            except Exception as exc:
+                self.log("Could not show %s: %s" % (kind, exc), "ERROR")
+            return True
+        if kind == "cursors":
+            if error is None:
+                self.apply_cursor_readings(*value)
+            return True
+        if kind == "dmm":
+            self.apply_dmm_reading(value, error)
+            return True
+        if kind == "autoset":
+            self._busy = False
+            if error is not None:
+                self._auto_report = None
+                self.log("AUTO failed: %s" % error, "ERROR")
+                self.capture_state.set("AUTO FAILED")
+                self.status_var.set(str(error))
+            else:
+                self._auto_report = value
+                self.plot_waveform()
+                self.report_auto_frame()
+                self.capture_state.set("FRAMED")
+                self.status_var.set("Framed from the instrument's own measurements")
+            return True
+        if kind == "record":
+            if error is not None:
+                self.recording = False
+                self.record_label.set("stopped: %s" % error)
+                self.log("Recording stopped: %s" % error, "ERROR")
+            else:
+                self.record_label.set("%d file(s) written" % self._records)
+            return True
+        return super().on_instrument_result(kind, token, value, error)
 
-        Only real numbers are kept: a scope that answers with something
-        unexpected must not take the plot down with it, so anything else leaves
-        the previous cursor alone.
+    def refresh_cursors(self):
+        """Ask for the two values the plot annotates.
+
+        Two USB round trips, so they are read on the worker and applied by
+        :meth:`apply_cursor_readings`. Called at the end of every frame, which is
+        why they are coalesced: a readback that has been overtaken by a newer one
+        is worth nothing.
         """
-        level = None
+        self.ask_scope("cursors", self.read_cursor_values, coalesce=True,
+                       priority=PRIORITY_REFRESH)
+
+    @staticmethod
+    def read_cursor_values(scope):
+        """The two readings the plot annotates, each failing to None on its own."""
         try:
-            level = self.scope.get_trigger_level_volts()
+            level = scope.get_trigger_level_volts()
         except Exception:
             level = None
-        self._trigger_level_v = level if isinstance(level, (int, float)) else None
-
-        position = None
         try:
-            position = self.scope.get_horizontal_position_seconds()
+            position = scope.get_horizontal_position_seconds()
         except Exception:
             position = None
+        return level, position
+
+    def apply_cursor_readings(self, level, position):
+        """Apply a readback. Only real numbers are kept, and each stands alone.
+
+        A scope that answers with something unexpected must not take the plot
+        down with it, so anything else leaves the previous cursor alone - and one
+        bad value must not discard the other one, which is a reading the
+        instrument did give.
+        """
+        self._trigger_level_v = level if isinstance(level, (int, float)) else self._trigger_level_v
         if isinstance(position, (int, float)):
             self._horizontal_position = position
 

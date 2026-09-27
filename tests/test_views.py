@@ -291,10 +291,17 @@ class ExportTests(ViewTestCase):
 
 class ConsoleTests(ViewTestCase):
     def test_a_query_is_sent_and_its_reply_shown(self):
+        # The command is a round trip, so the request reports that it went and the
+        # reply arrives through the console when the instrument answers.
         self.scope.query.return_value = "OWON,HDS271,25520161,V1.3.0"
-        self.assertEqual(self.app.run_scpi_command("*IDN?", False),
-                         "OWON,HDS271,25520161,V1.3.0")
+        shown = []
+        self.app._console_sink = shown.append
+        status = self.app.run_scpi_command("*IDN?", False)
+        self.assertIn("sent", status)
+        self.assertTrue(self.app.wait_for_instrument())
         self.scope.query.assert_called_once_with("*IDN?")
+        self.assertEqual(shown, ["OWON,HDS271,25520161,V1.3.0"])
+        self.assertIn("OWON,HDS271,25520161,V1.3.0", self.app.log_text.get("1.0", "end"))
 
     def test_a_write_is_refused_unless_it_was_asked_for(self):
         reply = self.app.run_scpi_command(":CHANnel1:SCALe 5v", False)
@@ -303,8 +310,12 @@ class ConsoleTests(ViewTestCase):
 
     def test_a_write_goes_through_when_allowed(self):
         self.scope.send_command.return_value = "OK"
-        self.assertEqual(self.app.run_scpi_command(":TRIGger:FORCe", True), "OK")
+        shown = []
+        self.app._console_sink = shown.append
+        self.assertIn("sent", self.app.run_scpi_command(":TRIGger:FORCe", True))
+        self.assertTrue(self.app.wait_for_instrument())
         self.scope.send_command.assert_called_once()
+        self.assertEqual(shown, ["OK"])
 
     def test_a_command_while_disconnected_says_so(self):
         self.scope.is_connected = False
@@ -312,15 +323,19 @@ class ConsoleTests(ViewTestCase):
 
     def test_the_console_reports_a_failure_rather_than_raising(self):
         self.scope.query.side_effect = RuntimeError("endpoint busy")
-        reply = self.app.run_scpi_command("*IDN?", False)
-        self.assertIn("failed", reply)
+        shown = []
+        self.app._console_sink = shown.append
+        self.assertIn("sent", self.app.run_scpi_command("*IDN?", False))
+        self.assertTrue(self.app.wait_for_instrument())
+        self.assertTrue(shown and "endpoint busy" in shown[0])
+        self.assertIn("endpoint busy", self.app.log_text.get("1.0", "end"))
 
     def test_the_dialog_sends_and_logs(self):
         seen = []
 
         def sender(text, allow):
             seen.append((text, allow))
-            return "OK"
+            return "sent"
 
         dialog = modern_lab.ScpiConsoleDialog(self.root, on_send=sender, scope=self.scope)
         try:
@@ -329,6 +344,9 @@ class ConsoleTests(ViewTestCase):
             self.assertEqual(seen, [("*IDN?", False)])
             self.assertIsNone(dialog.entry.get() or None)
             self.assertIn("*IDN?", dialog.log.get("1.0", "end"))
+            self.assertIn("sent", dialog.log.get("1.0", "end"))
+            # And the reply is written when it lands, which is after send() returns.
+            dialog.append("OK")
             self.assertIn("OK", dialog.log.get("1.0", "end"))
         finally:
             dialog.destroy()
@@ -379,11 +397,83 @@ class MultimeterModeTests(ViewTestCase):
         self.assertIn("Multimeter mode failed", self.app.log_text.get("1.0", "end"))
 
 
+class ResponsivenessTests(ViewTestCase):
+    """The window must keep beating while the instrument is slow.
+
+    This is the complaint the whole I/O worker exists for: during live acquisition
+    the panel stopped answering. The cause was not the capture - that always ran on
+    a worker - but the framing watch, the cursor readback and the multimeter read,
+    which were made from the Tk callbacks, so each of them froze the window for the
+    length of a USB round trip.
+    """
+
+    SLOW = 0.2
+
+    def slow(self, result):
+        """A scope call that takes 200 ms and then answers."""
+        def call(*args, **kwargs):
+            time.sleep(self.SLOW)
+            return result() if callable(result) else result
+        return call
+
+    def make_the_instrument_slow(self):
+        self.scope.download_waveform_data.side_effect = self.slow(True)
+        self.scope.framing_signature.side_effect = self.slow(("5v", "10X", "1ms"))
+        self.scope.get_trigger_level_volts.side_effect = self.slow(1.0)
+        self.scope.get_horizontal_position_seconds.side_effect = self.slow(0.0)
+        self.scope.get_dmm_reading.side_effect = self.slow(0.0)
+
+    def beat_for(self, seconds, action):
+        """Run the main loop for a while, timing the gaps between heartbeats."""
+        beats = []
+
+        def beat():
+            beats.append(time.monotonic())
+            if time.monotonic() < deadline:
+                self.root.after(10, beat)
+
+        deadline = time.monotonic() + seconds
+        self.root.after(10, beat)
+        action()
+        while time.monotonic() < deadline:
+            self.root.update()
+            time.sleep(0.001)
+        self.assertTrue(self.app.wait_for_instrument())
+        return [later - earlier for earlier, later in zip(beats, beats[1:])]
+
+    def test_the_window_keeps_beating_while_the_instrument_is_slow(self):
+        self.make_the_instrument_slow()
+
+        def live():
+            self.app.auto_refresh_var.set(True)
+            self.app.toggle_live()
+
+        gaps = self.beat_for(1.6, live)
+        self.assertTrue(gaps, "the main loop never ran at all")
+        # A callback that waits on the instrument shows up here as one long gap.
+        self.assertLess(max(gaps), 0.15,
+                        "the window was frozen for %.0f ms while the instrument was "
+                        "answering" % (max(gaps) * 1000))
+        self.app.auto_refresh_var.set(False)
+
+    def test_a_control_answers_without_waiting_for_the_instrument(self):
+        self.make_the_instrument_slow()
+        started = time.monotonic()
+        self.app.set_channel_display(1, False)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 0.05, "the press waited on the instrument")
+        self.assertTrue(self.app.wait_for_instrument())
+
+
 class TriggerPanelTests(ViewTestCase):
     def test_the_panel_lists_what_the_instrument_says(self):
         self.scope.get_trigger_mode.return_value = "AUTO"
         self.scope.get_timebase_scale.return_value = "500us"
-        rows = dict(self.app.trigger_state_rows())
+        # The dialog asks for the list; the instrument's rows come back from the
+        # worker and the capture's own rows are added on this side.
+        rows = {}
+        self.app.trigger_state_rows(lambda values, error=None: rows.update(values))
+        self.assertTrue(self.app.wait_for_instrument())
         self.assertEqual(rows["Trigger mode"], "AUTO")
         self.assertEqual(rows["Timebase"], "500us")
         # And the capture's own numbers, which are what the plot was drawn with.
@@ -391,7 +481,7 @@ class TriggerPanelTests(ViewTestCase):
 
     def test_a_node_that_fails_is_reported_against_its_own_row(self):
         self.scope.get_trigger_level_volts.side_effect = RuntimeError("no reply")
-        rows = dict(self.app.trigger_state_rows())
+        rows = dict(self.app.read_trigger_rows(self.scope))
         self.assertIn("error", rows["Trigger level"])
 
     def test_a_readout_dialog_shows_the_rows(self):
@@ -421,6 +511,7 @@ class AutosetTests(ViewTestCase):
         scope.get_timebase_scale = lambda: "200us"
         self.app.scope = scope
         self.app.software_autoset()
+        self.assertTrue(self.app.wait_for_instrument())
         # Three cycles of 1 kHz across 12 divisions is 250 us/div, and the ladder
         # step nearest by ratio is 200us.
         self.assertEqual(sent, ["200us"])
@@ -434,6 +525,7 @@ class AutosetTests(ViewTestCase):
         scope.set_timebase_scale = lambda value: sent.append(value) or "OK"
         self.app.scope = scope
         self.app.software_autoset()
+        self.assertTrue(self.app.wait_for_instrument())
         self.assertEqual(sent, [])
         self.assertIn("no frequency", self.app.log_text.get("1.0", "end"))
 
@@ -451,6 +543,9 @@ class RecordingTests(ViewTestCase):
         self.assertTrue(self.app.recording)
         first = self.app.record_capture()
         second = self.app.record_capture()
+        # The files are written on the worker, so the frame does not wait for the
+        # disk; the test waits for the writes the same way the app would.
+        self.assertTrue(self.app.wait_for_instrument())
         self.app.toggle_recording()
         self.assertFalse(self.app.recording)
         self.assertEqual(self.app._records, 2)
@@ -473,7 +568,12 @@ class RecordingTests(ViewTestCase):
         open(self.app.setup.values["record_folder"], "w").close()      # a file, not a directory
         self.app.recording = True
         with patch.object(waveform_export, "write_csv", side_effect=OSError("disk full")):
-            self.assertIsNone(self.app.record_capture())
+            path = self.app.record_capture()
+            # The write is on the worker, so the failure is known a moment later -
+            # and it still stops the recording rather than going quiet. The frame is
+            # named and returned either way; what the disk made of it arrives after.
+            self.assertTrue(self.app.wait_for_instrument())
+        self.assertTrue(path)
         self.assertFalse(self.app.recording)
         self.assertIn("stopped", self.app.record_label.get())
 

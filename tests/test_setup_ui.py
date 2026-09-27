@@ -176,6 +176,9 @@ class DeviceSelectionTests(PanelTestCase):
                 patch.object(self.app, "apply_channel_count"), \
                 patch.object(self.app, "plot_waveform"):
             self.app.connect_scope()
+            # Connecting is a worker job now: the panel is wired up when the
+            # instrument answers, so the transport call lands a moment later.
+            self.assertTrue(self.app.wait_for_instrument())
 
     def test_a_saved_serial_is_used_to_open_that_scope(self):
         self.app.setup = ScopeSetup({"usb_serial": "25520161"}, path=self.path)
@@ -199,6 +202,7 @@ class DeviceSelectionTests(PanelTestCase):
                     patch.object(self.app, "apply_channel_count"), \
                     patch.object(self.app, "plot_waveform"):
                 self.app.connect_scope()
+                self.assertTrue(self.app.wait_for_instrument())
         log = self.app.log_text.get("1.0", "end")
         self.assertIn("2 OWON USB devices", log)
         self.assertIn("25520161", log)

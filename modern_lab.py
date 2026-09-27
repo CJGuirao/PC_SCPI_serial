@@ -2,6 +2,8 @@
 import math
 import queue
 import threading
+
+from scope_io import PRIORITY_CAPTURE, PRIORITY_COMMAND, PRIORITY_REFRESH, ScopeIO
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -145,7 +147,12 @@ class ModernLabUI:
         self.style.configure("TCombobox", padding=3, fieldbackground="#efefea")
         self._busy = False
         self._closing = False
-        self._results = queue.Queue()
+        # Every call to the instrument goes through this one worker, so the Tk
+        # thread never waits on USB and two threads never share the HID handle.
+        self.io = ScopeIO(lambda: self.scope)
+        # A late delivery per submission token, for dialogs that fill themselves in
+        # when the reads they asked for come back.
+        self._deliveries = {}
         self._live_timer = None
         self._live_started = None
         self._live_period = None
@@ -274,17 +281,19 @@ class ModernLabUI:
         return button
 
     def action(self, command):
-        if self._busy:
-            self.status_var.set("Acquiring waveform… please wait")
-            return
+        """Run a control's command.
+
+        Not gated on an acquisition being in flight: with all instrument I/O on
+        the one worker, a setting changed now is queued behind the frame being
+        captured and applied a moment later, which is what a real instrument's
+        own front panel does. Refusing the press instead made the panel read as
+        unresponsive for half of every second during live acquisition.
+        """
         command()
 
     def ready(self):
         if not self.scope.is_connected:
             self.status_var.set("Connect an oscilloscope to change instrument settings")
-            return False
-        if self._busy:
-            self.status_var.set("Acquiring waveform… please wait")
             return False
         return True
 
@@ -500,18 +509,26 @@ class ModernLabUI:
         """Probe the instrument, then show only the channels it really has.
 
         Range is probed rather than inferred from the model name, so a
-        two-channel HDS200/HDS300 keeps its second column.
+        two-channel HDS200/HDS300 keeps its second column. The probe is a round
+        trip, so it is made on the worker; showing them is a widget change.
         """
         if not getattr(self.scope, "is_connected", False):
             # Nothing attached yet: only CH1 is certain, and a column for a
             # channel the instrument does not have is the thing being avoided.
             self.show_channels(1)
             return
+        self.report_later("channels", self.probe_channel_count,
+                          lambda available, error=None: self.show_channels(available or 1))
+
+    @staticmethod
+    def probe_channel_count(scope):
+        """How many channels the instrument answers for. On the worker."""
         try:
-            available = self.scope.get_channel_count()
+            return scope.get_channel_count()
         except Exception:
-            available = 1
-        self.show_channels(available)
+            # An instrument that will not say is treated as a single-channel scope
+            # rather than guessed at from the model name.
+            return 1
 
     def build_display(self, parent):
         top = tk.Frame(parent, bg=SCREEN)
@@ -758,18 +775,22 @@ class ModernLabUI:
         return max(50, int(seconds * 1000))
 
     def watch_framing(self):
-        """Notice a framing change made on the instrument and re-read the header.
+        """Ask for the framing signature; the answer lands in on_instrument_result.
 
-        Only three cheap text reads. When one moves, the cached header is dropped
-        so the next capture is parsed against the instrument's current framing, the
-        change is logged, and :meth:`framing_changed` is called for the panel's own
-        controls to follow.
+        Three cheap text reads, but they are read on the worker: asking here and
+        handling the answer later is what keeps a 96 ms USB round trip out of the
+        Tk callback. Coalesced, so a watch that has been overtaken by a newer one
+        is dropped rather than queueing behind the frame the user is waiting for.
         """
-        try:
-            signature = self.scope.framing_signature()
-        except Exception as exc:                                   # noqa: BLE001
-            self.log("Framing watch failed: %s" % exc)
-            return
+        self.io.submit("framing", lambda scope: scope.framing_signature(), coalesce=True)
+
+    def handle_framing(self, signature):
+        """Act on a framing signature: drop the header when the instrument moved.
+
+        When a value moves, the cached header is dropped so the next capture is
+        parsed against the instrument's current framing, the change is logged, and
+        :meth:`framing_changed` is called for the panel's own controls to follow.
+        """
         if signature == self._framing_signature:
             return
         first = self._framing_signature is None
@@ -1055,11 +1076,17 @@ class ModernLabUI:
         established how this dialect behaves, and it can also set the instrument
         into states that a capture will then report as broken.
         """
-        ScpiConsoleDialog(self.root, on_send=self.run_scpi_command, scope=self.scope)
+        dialog = ScpiConsoleDialog(self.root, on_send=self.run_scpi_command, scope=self.scope)
+        # Replies arrive after the dialog is open, so the app needs somewhere to
+        # put them; cleared when the window goes, so nothing is written into a
+        # destroyed widget.
+        self._console_sink = dialog.append
+        dialog.bind("<Destroy>", lambda event: setattr(self, "_console_sink", None), add="+")
 
     def open_trigger_state(self):
         """What the instrument says its trigger is doing, right now."""
-        ReadoutDialog(self.root, "Trigger and acquisition", self.trigger_state_rows,
+        ReadoutDialog(self.root, "Trigger and acquisition", None,
+                      request=self.trigger_state_rows,
                       on_refresh=self.refresh_trigger_state)
 
     # ------------------------------------------------------------------
@@ -1089,11 +1116,15 @@ class ModernLabUI:
         return None
 
     def download_waveform(self, reuse_header=False):
-        """Start a capture on a worker thread.
+        """Ask for a capture; it is fetched on the worker and drawn when it lands.
 
         ``reuse_header=True`` is the live path: it skips re-reading the capture
         header, which is a third of the frame, and lets the plot run at about
         twice the rate. A capture the user asked for gets a fresh header.
+
+        Nothing here waits: the request goes on the queue and ``poll_capture``
+        picks the finished frame up. This method is called from Tk callbacks, so
+        every microsecond it spends is a microsecond the window cannot repaint.
         """
         if not self.ready():
             return
@@ -1104,72 +1135,78 @@ class ModernLabUI:
         self._live_started = time.monotonic()
         self.capture_state.set("ACQUIRING…")
         self.status_var.set("Downloading waveform…")
-        def worker():
-            try:
-                # Calibrate every capture the user asked for, and now and then in
-                # the live loop. The measurement block costs a few round trips;
-                # without it the volts come from the header's volts/div label, and
-                # this firmware does not keep that label in step with the gain.
-                calibrate = (not reuse_header) or (self._live_frames % LIVE_CALIBRATE_EVERY == 0)
-                self._results.put(
-                    (self.scope.download_waveform_data(reuse_header=reuse_header,
-                                                       calibrate=calibrate), None))
-            except Exception as exc:
-                self._results.put((False, str(exc)))
-        self.start_worker(worker, "capture")
+        # Calibrate every capture the user asked for, and now and then in the live
+        # loop. The measurement block costs a few round trips; without it the volts
+        # come from the header's volts/div label, and this firmware does not keep
+        # that label in step with the gain.
+        calibrate = (not reuse_header) or (self._live_frames % LIVE_CALIBRATE_EVERY == 0)
+        self.ask_scope("capture",
+                       lambda scope: scope.download_waveform_data(reuse_header=reuse_header,
+                                                                  calibrate=calibrate),
+                       priority=PRIORITY_CAPTURE)
+
+    def ask_scope(self, kind, work, coalesce=False, priority=PRIORITY_COMMAND):
+        """Hand an instrument call to the I/O worker. Returns its token.
+
+        One place where the panel talks to the instrument, so that every call is
+        serialised on the single owner the endpoint requires and none of them runs
+        on the Tk thread.
+        """
+        return self.io.submit(kind, work, coalesce=coalesce, priority=priority)
+
+    def report_later(self, kind, work, deliver, coalesce=False):
+        """Run an instrument call and hand its result to ``deliver`` when it lands.
+
+        The callback travels with the submission, so a dialog can ask for something
+        that costs a few round trips and fill itself in when the answer arrives.
+        Nothing on this panel reads the instrument on the Tk thread any more, which
+        is what makes that necessary rather than a nicety.
+        """
+        token = self.ask_scope(kind, work, coalesce=coalesce)
+        if token is not None and deliver is not None:
+            self._deliveries[token] = deliver
+        return token
+
+    def tell_scope(self, description, work, coalesce=False):
+        """Send a setting from the worker, and log what was asked for.
+
+        The write is queued behind whatever is in flight instead of blocking the
+        window, which is what a front panel does: the knob moves now and the
+        instrument follows. The log line is the user's request; what the
+        instrument made of it is the controller's to report.
+        """
+        self.log(description)
+        return self.ask_scope("write", work, coalesce=coalesce)
+
+    def on_instrument_result(self, kind, token, value, error):
+        """A finished instrument call, back on the UI thread.
+
+        Returns True when this kind was handled here. Subclasses handle their own
+        kinds first and fall through to this.
+        """
+        if kind == "capture":
+            self.finish_capture(value, error)
+            return True
+        if kind == "framing":
+            if error is not None:
+                self.log("Framing watch failed: %s" % error)
+            else:
+                self.handle_framing(value)
+            return True
+        return False
 
     def poll_capture(self):
-        try:
-            success, error = self._results.get_nowait()
-        except queue.Empty:
-            pass
-        else:
-            self._busy = False
-            if self._closing:
-                self.finish_close()
-                return
-            if success:
-                self.refresh_cursors()
-                self.plot_waveform()
-                # Unattended recording, if it is on: one file per frame, written
-                # here so what is saved is what was just drawn.
-                self.record_capture()
-                if self.auto_refresh_var.get():
-                    # Show the rate actually achieved rather than the rate asked
-                    # for: a capture is instrument-limited, so the honest figure
-                    # is the one measured between frames.
-                    now = time.monotonic()
-                    if self._live_started:
-                        period = now - self._live_started
-                        self._live_period = (period if self._live_period is None
-                                             else 0.7 * self._live_period + 0.3 * period)
-                    self.capture_state.set("LIVE • %.1f s" % self._live_period
-                                           if self._live_period else "LIVE")
-                else:
-                    self.capture_state.set("CAPTURED")
-                self.status_var.set("Waveform acquired")
-                self.report_auto_frame()
-            else:
-                self.capture_state.set("ACQUISITION FAILED")
-                self.status_var.set(error or "Waveform download failed")
-                self.log(error or "Waveform download failed", "ERROR")
-                if self.auto_refresh_var.get():
-                    self.toggle_live()
-                self.capture_state.set("ACQUISITION FAILED")
-            if self.auto_refresh_var.get():
-                # Reuse the header on most frames, and re-read it now and then so
-                # a change made on the front panel still reaches the plot.
-                self._live_frames += 1
-                # The framing gets watched on its own, cheaper schedule: three
-                # 32 ms text reads against the 254 ms header. A volts/div set from
-                # the instrument's menu would otherwise sit unseen until the header
-                # came round - seconds during which the time base, whose label is
-                # read every frame, appears to work and the volts/div does not.
-                if (self._live_frames % LIVE_FRAMING_EVERY) == 0:
-                    self.watch_framing()
-                reuse = (self._live_frames % LIVE_HEADER_EVERY) != 0
-                self._live_timer = self.root.after(
-                    self.live_gap_ms(), lambda: self.download_waveform(reuse_header=reuse))
+        """Drain finished instrument calls and keep the live loop turning.
+
+        This is the only place results are applied, and it never calls the
+        instrument itself, so the frame the user is waiting for is the only thing
+        that can make the window wait.
+        """
+        def dispatch(kind, token, value, error):
+            if not self.on_instrument_result(kind, token, value, error):
+                self.log("Unhandled instrument reply: %s" % kind, "WARNING")
+
+        self.io.poll(dispatch)
         if not self._closing or self._busy:
             self._poll_timer = self.root.after(80, self.poll_capture)
             # The multimeter is read on the same timer, but far less often: one
@@ -1177,6 +1214,74 @@ class ModernLabUI:
             self._dmm_tick = (self._dmm_tick + 1) % 8
             if self._dmm_tick == 0:
                 self.poll_dmm()
+
+    def finish_capture(self, success, error):
+        """A frame arrived: draw it, and ask for the next one if live."""
+        self._busy = False
+        if self._closing:
+            self.finish_close()
+            return
+        if success:
+            # The readbacks are asked for, not performed: they are three more USB
+            # round trips, and the next frame must not queue behind them.
+            self.refresh_cursors()
+            self.plot_waveform()
+            # Unattended recording, if it is on: one file per frame, written from
+            # the worker so the disk does not hold up the drawing.
+            self.record_capture()
+            if self.auto_refresh_var.get():
+                # Show the rate actually achieved rather than the rate asked for: a
+                # capture is instrument-limited, so the honest figure is the one
+                # measured between frames.
+                now = time.monotonic()
+                if self._live_started:
+                    period = now - self._live_started
+                    self._live_period = (period if self._live_period is None
+                                         else 0.7 * self._live_period + 0.3 * period)
+                self.capture_state.set("LIVE • %.1f s" % self._live_period
+                                       if self._live_period else "LIVE")
+            else:
+                self.capture_state.set("CAPTURED")
+            self.status_var.set("Waveform acquired")
+            self.report_auto_frame()
+        else:
+            self.capture_state.set("ACQUISITION FAILED")
+            self.status_var.set(error or "Waveform download failed")
+            self.log(error or "Waveform download failed", "ERROR")
+            if self.auto_refresh_var.get():
+                self.toggle_live()
+            self.capture_state.set("ACQUISITION FAILED")
+        if self.auto_refresh_var.get():
+            # Reuse the header on most frames, and re-read it now and then so a
+            # change made on the front panel still reaches the plot.
+            self._live_frames += 1
+            # The framing gets watched on its own, cheaper schedule: three 32 ms
+            # text reads against the 254 ms header. A volts/div set from the
+            # instrument's menu would otherwise sit unseen until the header came
+            # round - seconds during which the time base, whose label is read every
+            # frame, appears to work and the volts/div does not.
+            if (self._live_frames % LIVE_FRAMING_EVERY) == 0:
+                self.watch_framing()
+            reuse = (self._live_frames % LIVE_HEADER_EVERY) != 0
+            self._live_timer = self.root.after(
+                self.live_gap_ms(), lambda: self.download_waveform(reuse_header=reuse))
+
+    def wait_for_instrument(self, timeout=5.0):
+        """Run the worker's queue to completion, applying results as they land.
+
+        The app itself never calls this: it drains from its own timer, which is what
+        keeps the window live. This exists so a test, or a headless probe, can assert
+        what a control did without a mainloop - driving the same path the UI drives
+        rather than a parallel one.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.io.poll(lambda kind, token, value, error:
+                         self.on_instrument_result(kind, token, value, error))
+            if self.io.quiet():
+                return True
+            time.sleep(0.005)
+        return False
 
     def close_panel(self):
         self._closing = True
@@ -1190,6 +1295,13 @@ class ModernLabUI:
 
 
     def finish_close(self):
+        # The worker is stopped before the widgets go: a result arriving after the
+        # canvas is gone would be applied to a destroyed widget.
+        try:
+            self.io.stop(timeout=1.0)
+            self.io.drain()
+        except Exception as exc:                                   # noqa: BLE001
+            self.log("Instrument worker did not stop cleanly: %s" % exc)
         for name in ("_clock_timer", "_poll_timer", "_live_timer"):
             timer = getattr(self, name, None)
             if timer:
@@ -1336,10 +1448,22 @@ class ScpiConsoleDialog(tk.Toplevel):
         self.entry.delete(0, "end")
         self.write("> " + text)
         try:
-            reply = self.on_send(text, self.allow_writes.get())
+            note = self.on_send(text, self.allow_writes.get())
         except Exception as exc:                                  # never take the window down
-            reply = "failed: %s" % exc
-        self.write("< " + str(reply))
+            note = "failed: %s" % exc
+        # The command is on the instrument's worker now, so this is the request's
+        # own note; the reply arrives through append() when the instrument answers.
+        if note:
+            self.write("\u00b7 " + str(note))
+
+    def append(self, text):
+        """Write a late reply. Called from the app when the answer lands."""
+        try:
+            self.write("< " + str(text))
+        except tk.TclError:
+            # The console was closed while the instrument was answering, which is
+            # allowed: the reply has nowhere to go and no one to tell.
+            return
 
 
 class ReadoutDialog(tk.Toplevel):
@@ -1349,13 +1473,17 @@ class ReadoutDialog(tk.Toplevel):
     screen is what was just asked for.
     """
 
-    def __init__(self, parent, title, provider, on_refresh=None):
+    def __init__(self, parent, title, provider, on_refresh=None, request=None):
         super().__init__(parent)
         self.title(title)
         self.configure(bg=PANEL)
         self.transient(parent)
         self.provider = provider
         self.on_refresh = on_refresh
+        # When a request is given, the rows are read on the instrument worker and
+        # shown when they arrive, so opening this dialog does not freeze the window
+        # for the twelve queries it makes.
+        self.request = request
         self.body = tk.Frame(self, bg=PANEL)
         self.body.pack(fill="both", expand=True, padx=12, pady=12)
         self.rows = {}
@@ -1371,13 +1499,28 @@ class ReadoutDialog(tk.Toplevel):
                 self.on_refresh()
             except Exception:
                 pass
+        if self.request is not None:
+            self.show_rows([("reading…", "the instrument is answering")])
+            self.request(self.show_rows)
+            return
         try:
             rows = list(self.provider() or [])
         except Exception as exc:
             rows = [("error", str(exc))]
+        self.show_rows(rows)
+
+    def show_rows(self, rows, error=None):
+        """Draw the rows. Also the delivery callback for an asynchronous read."""
+        if error is not None:
+            rows = [("error", str(error))]
+        # The dialog may have been closed while the instrument was answering.
+        try:
+            self.body.winfo_children()
+        except tk.TclError:
+            return
         for widget in self.body.winfo_children():
             widget.destroy()
-        for index, (label, value) in enumerate(rows):
+        for index, (label, value) in enumerate(rows or []):
             tk.Label(self.body, text=str(label), bg=PANEL, fg="#5c6464",
                      font=("Segoe UI", 9), anchor="w").grid(row=index, column=0,
                                                             sticky="w", padx=(0, 18), pady=1)
