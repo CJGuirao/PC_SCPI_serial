@@ -56,13 +56,28 @@ This project provides a Python-based GUI for OWON HDS200/HDS300 and SDS series o
 
 ## Usage
 
-From this directory, in a shell (Git Bash shown; on Windows double-clicking
-`run-portable.cmd` does the same thing):
+From this directory. Windows `cmd`:
+
+```bat
+cd /d C:\Users\<you>\Documents\GitHub\PC_SCPI_serial
+set TCL_LIBRARY=
+set TK_LIBRARY=
+.venv\Scripts\python.exe main.py
+```
+
+Git Bash:
 
 ```bash
 unset TCL_LIBRARY TK_LIBRARY
 ./.venv/Scripts/python.exe main.py
 ```
+
+Double-clicking `run-portable.cmd` does the same thing without a shell.
+
+**`set TCL_LIBRARY=` must be its own line in cmd.** Chaining it as
+`set TCL_LIBRARY= && ...` leaves the variable set to a single SPACE, which fails
+exactly as the original value does; if you want one line, quote it:
+`set "TCL_LIBRARY=" && set "TK_LIBRARY=" && .venv\Scripts\python.exe main.py`.
 
 The two variables are cleared because an installed CSR BlueSuite exports
 `TCL_LIBRARY` machine-wide, and Tk then refuses to start with "This probably means
