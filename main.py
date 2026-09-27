@@ -73,6 +73,12 @@ class App(ModernLabUI):
         #: Where each trace's 0 V sits, as last drawn: the panel's position control
         #: applied, per channel.
         self._zero_marks = []
+        #: The instrument's own vertical position, as last seen per channel, so a
+        #: front-panel turn can be told from the readbacks that come every frame.
+        self._instrument_position = {}
+        #: How many readbacks are being written into live controls right now: a
+        #: control applies what it holds, and a readback must not become a write.
+        self._sync_depth = 0
         self._display_scale_is_auto = {}
         #: The probe convention the trace is SHOWN in, per channel. Unset means the
         #: instrument's own, and the trace is then drawn in tip volts.
@@ -328,6 +334,26 @@ class App(ModernLabUI):
                  "read 25.6 V while it announced 10X), and the label does not scale "
                  "them." % (channel, probe))
         self.plot_waveform()
+
+    def sync_entry(self, widget, text):
+        """Put a readback into a live control without it turning into a write.
+
+        A live control applies what it holds, so a readback has to land in it or
+        the control shows something the instrument never said - and the knob then
+        works from a stale value, which from the outside is a dead knob. The write
+        is made with live application switched off, because the instrument is the
+        one that just said this, and only when the text differs, which is also what
+        keeps two of these from bouncing off each other.
+        """
+        if widget is None or widget.get() == text:
+            return False
+        self._sync_depth = getattr(self, "_sync_depth", 0) + 1
+        try:
+            widget.delete(0, tk.END)
+            widget.insert(0, text)
+        finally:
+            self._sync_depth -= 1
+        return True
 
     def set_channel_offset(self, channel, offset):
         """Move this trace up and down in the view, in volts at the input.
@@ -1080,6 +1106,34 @@ class App(ModernLabUI):
                                      "amplitudes do not depend on it"
                                      % (number, candidate, channel.get("attenuation") or "?"))
                         break
+            self.follow_instrument_position(number, channel)
+
+    def follow_instrument_position(self, number, channel):
+        """Move this view when the instrument moves its own trace.
+
+        The capture carries the instrument's vertical position in divisions of its
+        volts/div, so a turn of the front-panel knob reaches the panel the same way
+        a volts/div change reaches its own control. It is applied to the drawing as
+        well, because the two screens are meant to agree - and only when the value
+        CHANGES, so a position set here is not wiped by the readback that arrives
+        with every frame.
+
+        The instrument's position is shown in this view's own volts per division, so
+        a row here means the same thing as a row there.
+        """
+        divisions = channel.get("vertical_offset_div")
+        per_division = self.display_scale_value(number, channel)
+        if not isinstance(divisions, (int, float)) or not per_division:
+            return
+        instrument = divisions * per_division
+        if instrument == self._instrument_position.get(number):
+            return
+        self._instrument_position[number] = instrument
+        self._display_offset[number] = instrument
+        if self.sync_entry(getattr(self, "ch%d_offset" % number, None), "%g" % instrument):
+            self.log("CH%d position %+.3g V: the instrument moved its own trace, and this "
+                     "view follows it. %+.2f division%s of its screen."
+                     % (number, instrument, divisions, "" if abs(divisions) == 1 else "s"))
 
     def framing_changed(self):
         """A framing change was seen on the instrument: follow it here.
@@ -1977,6 +2031,12 @@ class App(ModernLabUI):
         instrument did give.
         """
         self._trigger_level_v = level if isinstance(level, (int, float)) else self._trigger_level_v
+        if isinstance(level, (int, float)):
+            # The graph was already following this value; the knob must too. One
+            # detent of a knob applies what the box holds, so a box left at its
+            # starting 0 sent the instrument to 0 V the moment it was touched -
+            # which is what a trigger knob that "does not work" looks like.
+            self.sync_entry(getattr(self, "trigger_level", None), "%g" % level)
         if isinstance(position, (int, float)):
             self._horizontal_position = position
 
@@ -2021,13 +2081,12 @@ class App(ModernLabUI):
         start at.
 
         Drawn the way an instrument draws its ground reference: a thin dotted line
-        across the graticule in the channel's own colour, labelled at the edge, CH1
-        on the left and CH2 on the right so two traces cannot label over each
-        other. Nothing here touches the frame - the marker moves, the grid does not.
+        across the graticule in the channel's own colour, labelled at the right
+        edge where it does not compete with the trace leaving the frame. Nothing
+        here touches the frame - the marker moves, the grid does not.
         """
         self._zero_marks = []
-        for index, (name, colour, offset, volts_per_div) in enumerate(references):
-            right = bool(index % 2)
+        for name, colour, offset, volts_per_div in references:
             moved = abs(offset) > 1e-12
             self.ax.axhline(offset, color=colour, linewidth=0.9, alpha=0.7, zorder=1.6,
                             linestyle=(0, (1.0, 1.6)) if moved else (0, (1.0, 3.4)))
@@ -2036,11 +2095,10 @@ class App(ModernLabUI):
                 label += "  %+.3g V" % offset
                 if volts_per_div:
                     label += "  (%+.2f div)" % (offset / volts_per_div)
-            self.ax.annotate(label, xy=(1.0 if right else 0.0, offset),
+            self.ax.annotate(label, xy=(1.0, offset),
                              xycoords=("axes fraction", "data"),
-                             xytext=(-5 if right else 5, 0), textcoords="offset points",
-                             color=colour, fontsize=8, va="center",
-                             ha="right" if right else "left",
+                             xytext=(-5, 0), textcoords="offset points",
+                             color=colour, fontsize=8, va="center", ha="right",
                              annotation_clip=False)
             self._zero_marks.append({"name": name, "offset": offset, "label": label})
 

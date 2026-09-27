@@ -381,6 +381,11 @@ class ModernLabUI:
 
     def schedule_live(self, name, command, delay=200):
         """Queue a live write, replacing any still pending for the same control."""
+        if getattr(self, "_sync_depth", 0):
+            # A readback is being written into the control right now. It came from
+            # the instrument, so sending it straight back is at best a wasted round
+            # trip and at worst a write the instrument never asked for.
+            return
         if not self.root.winfo_exists():
             return
         pending = self._live_apply.get(name)
@@ -403,10 +408,15 @@ class ModernLabUI:
         if not self.ready():
             return
         try:
-            value = float(self._vars[name].get()) + direction * step
+            current = float(self._vars[name].get())
         except ValueError:
-            self.status_var.set("Enter a numeric value before turning this knob")
-            return
+            if self._vars[name].get().strip():
+                self.status_var.set("Enter a numeric value before turning this knob")
+                return
+            # An empty box is a value that has not been read yet, not a bad one:
+            # the knob moves from zero instead of refusing to move at all.
+            current = 0.0
+        value = current + direction * step
         self._vars[name].set("%g" % value)
         if not live:
             command()

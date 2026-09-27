@@ -831,6 +831,20 @@ class VerticalFrameTests(PanelTestCase):
         self.frame_of(self.channel(5.0), silent)
         self.assertEqual(["CH1"], [mark["name"] for mark in self.app._zero_marks])
 
+    def test_both_zero_labels_sit_at_the_right_edge(self):
+        # One place to read them: with CH1 labelled on the left and CH2 on the
+        # right, comparing two zero points meant looking at two edges for one
+        # number each.
+        self.scope.waveform_data.channels = [self.channel(5.0),
+                                             dict(self.channel(5.0), name="CH2")]
+        with patch.object(self.app, "sync_vertical_controls"):
+            self.app.plot_waveform()
+        labels = [text for text in self.app.ax.texts if text.get_text().endswith("0V")]
+        self.assertEqual(2, len(labels))
+        for label in labels:
+            self.assertEqual("right", label.get_ha())
+            self.assertEqual(1.0, label.xy[0])
+
     def test_a_finer_volts_div_draws_a_taller_trace(self):
         # The whole point of framing on the instrument's screen: a row is the
         # selected volts/div, so the same volts must fill more rows at a finer
@@ -1031,6 +1045,71 @@ class ConnectionFieldTests(PanelTestCase):
         # The transport is opened on the worker, so the call is made a moment later.
         self.assertTrue(self.app.wait_for_instrument())
         self.scope.connect_usb.assert_called_once_with("auto", 115200)
+
+
+class ControlReadbackTests(PanelTestCase):
+    """A value read from the instrument has to reach the control that shows it.
+
+    The live controls apply what they hold, so a control left holding something
+    else is not merely cosmetic - one detent of it sends that stale value to the
+    instrument, which is what a knob that "does not work" looks like from outside.
+    """
+
+    CHANNEL = {"name": "CH1", "units": "V", "volts_per_div": 5.0,
+               "true_volts_per_div": 5.0, "vertical_offset_div": 0.0,
+               "point_interval": 1e-4, "waveform_data": [0.0, 1.0]}
+
+    def settle_live(self, seconds=0.4):
+        """Let a live control's debounce fire, the way a running panel would."""
+        import time
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            self.root.update()
+            time.sleep(0.01)
+
+    def test_the_trigger_level_reaches_the_knob(self):
+        self.app.apply_cursor_readings(1.25, None)
+        self.assertEqual("1.25", self.app.trigger_level.get())
+
+    def test_a_readback_is_not_sent_straight_back(self):
+        # Long enough for the debounce to fire: the instrument just said this
+        # value, so it must not come back as a write.
+        self.app.apply_cursor_readings(1.25, None)
+        self.settle_live(0.35)
+        self.assertTrue(self.app.wait_for_instrument())
+        self.scope.set_edge_trigger_level.assert_not_called()
+
+    def test_a_knob_turned_from_a_readback_sends_that_value(self):
+        self.app.apply_cursor_readings(-2.0, None)
+        # As the panel's knob drives it: 0.1 V detents, applied when it settles.
+        self.app.step_number("trigger_level", 1, self.app.set_trigger_level, 0.1, True)
+        self.settle_live()
+        self.assertTrue(self.app.wait_for_instrument())
+        self.scope.set_edge_trigger_level.assert_called_once_with(-1.9)
+
+    def test_an_empty_box_still_turns(self):
+        self.app._vars["trigger_level"].set("")
+        self.app.step_number("trigger_level", 1, self.app.set_trigger_level, 0.1, True)
+        self.assertEqual("0.1", self.app._vars["trigger_level"].get())
+
+    def test_the_position_follows_the_instrument_when_it_moves(self):
+        channel = dict(self.CHANNEL, vertical_offset_div=1.0)
+        self.app.follow_instrument_position(1, channel)
+        self.assertAlmostEqual(5.0, self.app._display_offset[1], places=9)
+        self.assertEqual("5", self.app.ch1_offset.get())
+
+    def test_a_position_that_has_not_moved_is_left_alone(self):
+        # The readback arrives with every frame; taking it each time would wipe a
+        # value set on the panel several times a second.
+        self.app.follow_instrument_position(1, dict(self.CHANNEL))
+        self.app.set_channel_offset(1, 2.5)
+        self.app.follow_instrument_position(1, dict(self.CHANNEL))
+        self.assertAlmostEqual(2.5, self.app._display_offset[1], places=9)
+
+    def test_a_position_with_nothing_to_scale_is_ignored(self):
+        raw = dict(self.CHANNEL, true_volts_per_div=None, vertical_offset_div=1.0)
+        self.app.follow_instrument_position(1, raw)
+        self.assertAlmostEqual(0.0, self.app.display_offset(1), places=9)
 
 
 class CaptureHeaderRetryTests(unittest.TestCase):
