@@ -1076,6 +1076,56 @@ class App(ModernLabUI):
                 best, best_gap = choice, gap
         return best
 
+    def framing_choice(self, value, choices):
+        """The finest offered setting that still shows a capture decoded at ``value``.
+
+        The capture's own scale comes from the instrument's readings and its codes:
+        they span the eight rows of the screen, so one row is worth exactly the scale
+        the decode came out at, and the trace fills the grid at that setting. Snapping
+        that to the NEAREST offered setting can go DOWN, and a row finer than the
+        capture is worth means the trace no longer fits the frame - it runs past the
+        top of the grid, every fast edge is drawn chopped at the edge, and the flyback
+        of a sawtooth reads as a spike standing over the ramp instead of a clean edge.
+
+        So the setting has to be at least as coarse as the decode. This is the same
+        arithmetic the user checks a reading with: a 25 Vpp signal needs 5 V/div to
+        make 5 divisions of an eight-row grid.
+        """
+        best, best_value = None, None
+        for choice in choices:
+            parsed = OWONScopeController.parse_scale(choice)
+            if parsed is None or parsed < value * (1.0 - 1e-9):
+                continue
+            if best_value is None or parsed < best_value:
+                best, best_value = choice, parsed
+        if best is None:
+            # Nothing offered is coarse enough to hold the signal. Name the coarsest
+            # there is, so the control and the axis still agree, and let the caller
+            # say the trace will not fit at any setting rather than silently chop it.
+            return self.nearest_choice(value, choices)
+        return best
+
+    def off_scale_report(self, drawn_low, drawn_high, framing):
+        """What to say when the trace does not fit the grid, or None when it does.
+
+        A trace drawn past the frame is chopped at the edge, which is indistinguishable
+        from a signal that really does peak at the top row - so this names the setting
+        that WOULD hold it. The instrument's own screen has the same eight rows, so a
+        setting that frames it here frames it there too.
+        """
+        if not framing or drawn_low is None:
+            return None
+        if drawn_low >= framing.get("low") and drawn_high <= framing.get("high"):
+            return None
+        needed = max(abs(drawn_low), abs(drawn_high)) / (HDS_VERTICAL_DIVISIONS / 2.0)
+        widget = getattr(self, "ch1_scale", None)
+        choices = self.choice_values(widget) if widget is not None else []
+        wanted = self.framing_choice(needed, choices) if choices else None
+        shown = WaveformData._scale_to_float(wanted) if wanted else None
+        return ("trace is off the grid at this setting (%+.1f..%+.1f V over %+.1f..%+.1f V)"
+                "%s" % (drawn_low, drawn_high, framing.get("low", 0.0), framing.get("high", 0.0),
+                        " - %s would frame it" % wanted if shown else ""))
+
     def sync_vertical_controls(self):
         """Follow a framing change made on the instrument.
 
@@ -1277,12 +1327,39 @@ class App(ModernLabUI):
             widget = getattr(self, "ch%d_scale" % number, None)
             choices = self.choice_values(widget) if widget is not None else None
             if choices:
-                snapped = self.nearest_choice(decoded, choices)
+                # Frame it, do not merely round it: the nearest setting can be finer
+                # than the capture, and then the trace is drawn taller than the grid.
+                snapped = self.framing_choice(decoded, choices)
                 value = WaveformData._scale_to_float(snapped) if snapped else None
                 if value:
                     return value
             return decoded
         return None
+
+    @staticmethod
+    def frame_centre(entry, step=None):
+        """The volts at the middle of the instrument's screen.
+
+        The sample codes ARE the instrument's rows and the decode places the code
+        midpoint at the middle of that screen, so the middle of a capture's own range
+        is the middle of its screen. Centring the grid on 0 V instead only works while
+        the signal straddles zero: a unipolar capture, whose instrument MIN reads
+        0.0000e+00, then sits entirely in the top half of the frame and everything
+        above the middle row is chopped off at the edge. That is what drew a
+        sawtooth's flyback as a spike standing over the ramp while the instrument's own
+        screen showed the same signal framed and clean.
+
+        Quantised to an eighth of a row, so the extremes' own frame-to-frame jitter
+        cannot make the grid drift while acquisition runs.
+        """
+        samples = [v for v in (entry.get("waveform_data") or [])
+                   if isinstance(v, (int, float))]
+        if not samples:
+            return 0.0
+        centre = (min(samples) + max(samples)) / 2.0
+        if step:
+            centre = round(centre / (step / 8.0)) * (step / 8.0)
+        return centre
 
     def vertical_frame(self, channels):
         """The volts the trace is drawn against, in the software's own display scale.
@@ -1310,13 +1387,16 @@ class App(ModernLabUI):
             if not volts_per_div or not samples or channel.get("units") != "V":
                 continue
             half = (HDS_VERTICAL_DIVISIONS / 2.0) * volts_per_div
+            # The window is the instrument's own screen, centred on the middle of the
+            # capture rather than on 0 V: see frame_centre.
+            middle = self.frame_centre(channel, volts_per_div)
             # The frame is the instrument's screen, so the position control does
             # NOT move it: the trace moves across a grid that stays where it is,
             # which is what makes a row on screen mean the volts/div it reads.
             # Adding the offset here moved the window with the trace, so the two
             # cancelled and the grid slid while the trace held still - a visual
             # reading taken against a sliding grid is worth nothing.
-            spans.append((-half, half))
+            spans.append((middle - half, middle + half))
             note = ""
             claim = channel.get("volts_per_div")
             decoded = channel.get("true_volts_per_div")
@@ -1920,6 +2000,9 @@ class App(ModernLabUI):
         self.ax.set_xlabel(f"Time ({unit})")
 
         plotted = False
+        # The extent of what actually gets drawn, offsets included, so a trace pushed
+        # off the grid can be reported rather than silently chopped at the edge.
+        drawn_low, drawn_high = None, None
         # (name, colour, where this trace's zero sits, volts per row of the grid),
         # for the 0 V markers drawn with the graticule below.
         references = []
@@ -1942,6 +2025,8 @@ class App(ModernLabUI):
             x = np.arange(y.size, dtype=float) * float(channel.get("point_interval", 1.0) or 1.0) * factor
             self.ax.plot(x, y, color=color, linewidth=1.4)
             plotted = True
+            drawn_low = float(np.min(y)) if drawn_low is None else min(drawn_low, float(np.min(y)))
+            drawn_high = float(np.max(y)) if drawn_high is None else max(drawn_high, float(np.max(y)))
             references.append((name, color,
                                self.display_offset(number) if number else 0.0,
                                self.display_scale_value(number, channel) if number else None))
@@ -1958,6 +2043,16 @@ class App(ModernLabUI):
         window = span
         if isinstance(timebase, (int, float)) and timebase:
             window = float(timebase) * HDS_HORIZONTAL_DIVISIONS * factor
+
+        if plotted and framing:
+            # Said once per situation rather than once per frame: it names the setting
+            # that would frame the signal, which is a fact about the capture, not news.
+            note = self.off_scale_report(drawn_low, drawn_high, framing)
+            if note != getattr(self, "_off_scale_note", None):
+                self._off_scale_note = note
+                if note:
+                    self.status_var.set(note)
+                    self.log(note)
 
         if not plotted:
             self.ax.text(0.5, 0.5, "No waveform data", transform=self.ax.transAxes,

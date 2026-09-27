@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import modern_lab
 from owon_controller import OWONScopeController
+from waveform_data import WaveformData
 from unittest.mock import Mock, patch
 from waveform_data import HDS_VERTICAL_DIVISIONS
 
@@ -1110,6 +1111,77 @@ class ControlReadbackTests(PanelTestCase):
         raw = dict(self.CHANNEL, true_volts_per_div=None, vertical_offset_div=1.0)
         self.app.follow_instrument_position(1, raw)
         self.assertAlmostEqual(0.0, self.app.display_offset(1), places=9)
+
+
+class AutoFramingTests(PanelTestCase):
+    """Auto must frame the capture, not round it to a finer setting.
+
+    The codes span the eight rows of the instrument's screen, so one row is worth
+    exactly the scale the capture was decoded at and the trace fills the grid there.
+    A setting FINER than that draws the trace taller than the grid: its peaks run
+    past the top row, each fast edge is chopped at the edge, and a sawtooth's flyback
+    is drawn as a spike standing over the ramp - which is how it was reported from
+    the bench, as spikes the instrument's own screen does not show.
+    """
+
+    def capture(self, volts_per_div=3.187, span=12.7):
+        """A capture decoded at `volts_per_div` a row, spanning four rows each way."""
+        return {"name": "CH1", "units": "V", "volts_per_div": volts_per_div,
+                "true_volts_per_div": volts_per_div,
+                "volts_per_code_source": "instrument measurements",
+                "vertical_offset_div": 0.0, "attenuation": "10X",
+                "point_interval": 2e-5,
+                "waveform_data": [-span, 0.0, span]}
+
+    def frame(self, volts_per_div):
+        return {"low": -4.0 * volts_per_div, "high": 4.0 * volts_per_div}
+
+    def test_auto_names_a_setting_at_least_as_coarse_as_the_capture(self):
+        # 3.187 V/div decoded: the nearest offered setting is 2, which is finer than
+        # the capture and clips it. The one that holds it is 5.
+        chosen = self.app.framing_choice(3.187, self.app.choice_values(self.app.ch1_scale))
+        self.assertEqual(5.0, WaveformData._scale_to_float(chosen))
+
+    def test_the_sawtooth_fits_the_grid_on_auto(self):
+        entry = self.capture(3.187, span=12.7)
+        self.app._display_scale[1] = None                       # Auto
+        scale = self.app.display_scale_value(1, entry)
+        self.assertGreaterEqual(scale * 4.0, 12.7)              # the frame holds it
+        self.assertIsNone(self.app.off_scale_report(-12.7, 12.7, self.frame(scale)))
+
+    def test_a_unipolar_capture_gets_a_frame_that_holds_it(self):
+        # The bench case: the instrument's own MIN reads 0.0000e+00, so every sample
+        # sits at or above the decode's zero. A grid centred on 0 V then keeps the
+        # whole trace in its top half and chops the peaks at the edge.
+        entry = {"name": "CH1", "units": "V", "volts_per_div": 5.0,
+                 "true_volts_per_div": 3.187,
+                 "volts_per_code_source": "instrument measurements",
+                 "vertical_offset_div": 0.0, "attenuation": "10X",
+                 "point_interval": 2e-5, "waveform_data": [0.0, 12.7, 25.4]}
+        self.app._display_scale[1] = None                       # Auto
+        frame = self.app.vertical_frame([entry])
+        self.assertLessEqual(frame["low"], 0.0)
+        self.assertGreaterEqual(frame["high"], 25.4)
+        self.assertIsNone(self.app.off_scale_report(0.0, 25.4, frame))
+
+    def test_a_finer_setting_that_chops_the_trace_says_so(self):
+        note = self.app.off_scale_report(-12.7, 12.7, self.frame(2.0))
+        self.assertIn("off the grid", note)
+        self.assertIn("5v", note)                               # what would frame it
+
+    def test_a_trace_inside_the_grid_says_nothing(self):
+        self.assertIsNone(self.app.off_scale_report(-7.0, 7.0, self.frame(2.0)))
+
+    def test_a_pinned_setting_is_honoured_even_when_it_magnifies(self):
+        self.app._display_scale[1] = "1v"
+        self.assertEqual(1.0, self.app.display_scale_value(1, self.capture()))
+
+    def test_the_panel_reports_it_rather_than_chopping_silently(self):
+        entry = self.capture(3.187, span=12.7)
+        self.scope.waveform_data.channels = [entry]
+        self.app._display_scale[1] = "2v"
+        self.app.plot_time()
+        self.assertIn("off the grid", self.app.status_var.get())
 
 
 class StateIndicatorTests(PanelTestCase):
