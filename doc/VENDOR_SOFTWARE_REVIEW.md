@@ -287,3 +287,49 @@ instrument:
 * **Instrument-side (Tier B):** the command is sent, read back, and only then
   offered in the UI; anything that changes instrument state gets a warning first,
   and anything that has ever corrupted a readout is documented as such.
+
+---
+
+## What was implemented
+
+Written after the event, and kept honest: each row says how it was checked, and
+"on hardware" means it was exercised against the HDS271 on this bench. Everything
+else is a unit test, or a reading of the protocol documents in `doc/`.
+
+| From the review | State | Where it lives, and what was checked |
+|---|---|---|
+| A1 Measurement cursors | **done** | `analysis.cursor_readings` / `describe_cursors`; dragged or clicked in the time view. On a synthetic 25 Vpp square wave it read ΔT 500 us, 1/ΔT 2 kHz, ΔV 25 V. |
+| A2 Client-side FFT | **done** | `analysis.fft_spectrum`. Checked against theory, not against itself: a 25 Vpp 1 kHz square wave peaks at **15.912 / 5.295 / 3.166 / 2.251 V** at 1/3/5/7 kHz, against **15.92 / 5.31 / 3.18 / 2.27** from 4A/πn. The frequency axis is built from the capture's own `point_interval`, never from the announced rate, and the Nyquist limit is printed on the plot. |
+| A3 Maths traces | **done** | `analysis.math_trace`; the MATH view, which refuses two channels of different lengths rather than plotting half of one. |
+| A4 Unattended logging | **done** | RECORD, with the folder and interval in SETUP; one CSV per frame, numbered, so two frames in the same second do not overwrite each other. |
+| A5 Export breadth | **done** | `waveform_export`: CSV, JSON, XLSX (written by hand — neither `openpyxl` nor `xlsxwriter` is installed here), PNG and PDF, each with a provenance block. |
+| A6 Waveform player | **done** | OPEN, `waveform_export.read_capture`: a saved capture can be read in every view, and it opens the plot straight away. The sample interval is recovered from the file, so the FFT of a loaded capture is as honest as the live one. |
+| A7 Data table | **done** | The TABLE view; every sample, and the export carries all of them when the display is capped (which is the caveat the vendor's own dialog states). |
+| A8 XY mode | **done** | The XY view, which says so when there are not two channels to plot against each other. |
+| A9 Display options | **partly** | Plot palettes (Dark, Light, Print) in SETUP, and the Print palette for exported figures. The vendor's own theme details and per-channel colour pickers are not copied. |
+| A10 Per-model settings | **done** | `scope_setup.per_model`, keyed by the name `*IDN?` reports and adopted on connect. A second scope no longer inherits the first one's trim, which is exactly how a plausible-looking factor gets applied to the wrong instrument. |
+| B1 Trigger panel | **done** | The TRIGGER read-out: what the instrument says it is doing beside what the capture was drawn from. |
+| B2 Channel / sample panels | **already present** | The front panel's channel and acquisition controls, each written and read back. |
+| B3 Autoset, run/stop, self-correct | **partly** | **Software autoset** frames the time axis from the measured frequency — the one framing write this interface can make. There is **no** run/stop/force command in the HDS200 set, so the panel says that, and the SCPI console will send one for anyone who wants to try. Self-correct is a front-panel action; the panel says where it is. |
+| B4 Multimeter modes | **done, and measured** | The picker offers only what the instrument answers. Probed live: VOLT/AMP (DC and AC) and REL answer; resistance, diode, continuity and capacitance are silent, so they are named as unavailable instead of offered as buttons that do nothing. |
+| B5 Network settings | **not applicable** | `doc/HDS200_Series_SCPI_Protocol.pdf` documents no LAN nodes for this family; the LAN transport in this app is for the SDS instruments. |
+| B6 Deep memory, stored files | **not available on this unit** | `datatype=SCREEN`, 300 points a frame. The review's finding stands: only the current page is ever exported, and CSV is the way out. |
+| B7 SCPI console | **done** | Read-only until *allow writes* is ticked; every reply is echoed to the log. |
+| C1 Built-in generator | **not applicable** | No AWG on this instrument, so the generator panel has nothing to drive. |
+| C2 Private "rapid" USB protocol | **declined** | Theirs, undocumented, and single-owner: we hold the HID endpoint ourselves and parse the capture. |
+| C3 Self-update | **declined** | The vendor app carries its own updater; this is a source tree. |
+
+### Still open
+
+* **A9's theme details** — the palettes are ours (Dark, Light, Print), not a copy of
+  the vendor's look.
+* **B3's run/stop and force trigger** — unverified, because the documented set has
+  no such node. If you want certainty, the console is the place to ask the
+  instrument; if it answers, a button is ten lines.
+* **Self-correct** and the instrument's own network settings are front-panel
+  actions, for the same reason: no node.
+* **The "2 ms" question** from the earlier sessions is still open. The instrument
+  measures 1.0000 ms on every capture, and its own Period/Frequency agree, so if
+  the generator really is set to 2 ms then what reaches the scope is not 2 ms.
+  Nothing in this review changes that.
+

@@ -5,16 +5,45 @@ This project provides a Python-based GUI for OWON HDS200/HDS300 and SDS series o
 ![OWON HDS Oscilloscope Control GUI](doc/screen.jpg)
 
 ## Features
+
+**Acquisition and control**
 - Connect to OWON HDS200/HDS300 or SDS oscilloscopes via LAN or USB
 - SCPI command support for instrument configuration
 - Download and parse waveform data (screen and deep memory)
-- Waveform plotting with matplotlib
+- USB auto-detect for OWON serial devices (VID/PID 5345:1234), with a picker when
+  more than one is attached
 - Query and display measurements (frequency, voltage, timing, etc.)
-- USB auto-detect for OWON serial devices (VID/PID 5345:1234)
-- Save waveform data as CSV or JSON
-- Auto-refresh and continuous monitoring (SLOW)
+- Auto-refresh and continuous monitoring, at an interval you choose
 - Channel controls: display, scale, coupling, probe, vertical offset
 - Timebase, trigger, acquisition, and memory depth controls
+- A **SCPI console**, read-only until you allow writes, for talking to the
+  instrument in its own language
+- A **trigger and acquisition read-back panel**: what the instrument says it is
+  doing, next to what the capture was actually drawn from
+- A **multimeter mode picker**, limited to the functions the instrument answers
+- **Software autoset**: frames the time axis from the measured frequency, using the
+  one framing write this interface can actually make
+
+**Reading the capture**
+- Four views of the same samples: **time, FFT, maths, XY**
+- **FFT** with the vendor software's windows (Rectangle, Hanning, Hamming,
+  Blackman), in dBV, Vrms or volts, linear or log frequency, with the peaks
+  labelled. The frequency axis is derived from the capture's own sample interval,
+  never from the instrument's announced rate, and the Nyquist limit is printed on
+  the plot
+- **Maths traces**: CH1±CH2, CH1×CH2, either channel inverted
+- **Measurement cursors**: two time markers giving ΔT, 1/ΔT and each trace's level
+  at both, and two voltage markers giving ΔV. Drag them, or click to place them
+- A **data table** view of the samples
+
+**Keeping it**
+- Save as CSV, JSON, Excel (`.xlsx`), PNG or PDF — every format carrying the
+  settings that make its numbers checkable
+- Open a saved capture and read it offline, in any of the views
+- **Unattended recording**: one CSV per frame into a folder you choose
+- A **SETUP** screen that saves which scope to talk to, the calibration, the
+  monitoring interval, the plot palette and the FFT defaults
+- Plot palettes: Dark, Light, and a Print palette for exported figures
 
 ## Requirements
 - Python 3.7+
@@ -22,6 +51,8 @@ This project provides a Python-based GUI for OWON HDS200/HDS300 and SDS series o
 - numpy
 - matplotlib
 - pyserial
+- pyusb (for the USB HID transport used by the HDS200/HDS300)
+- Pillow
 
 ## Usage
 1. Install dependencies: `pip install numpy matplotlib pyserial`
@@ -30,10 +61,17 @@ This project provides a Python-based GUI for OWON HDS200/HDS300 and SDS series o
 
 ## File Structure
 - `main.py` - Main application and GUI
+- `modern_lab.py` - The front panel itself: plot, drawers, dialogs
 - `owon_controller.py` - SCPI and binary protocol controller
-- `waveform_data.py` - Waveform data parser
+- `waveform_data.py` - Waveform data parser and vertical calibration
+- `hds_usb.py` - USB HID transport and device enumeration
+- `analysis.py` - Spectrum, maths, cursors, time axis (no UI, no instrument)
+- `waveform_export.py` - CSV/JSON/XLSX/PNG/PDF export, and reading captures back
+- `scope_setup.py` - Bench settings: which scope, and the calibration
+- `calibrate_manual.py` - Derives the calibration trim from a live capture
 - `scope_gui.py` - Additional GUI components
 - `console.py` - SCPI console to talk with the scope
+- `tests/` - The test suite (`python -m unittest discover -s tests -t .`)
 
 ## Notes
 - I have tested it on a SDS6202 oscilloscope through LAN. To be able to ping it I had to change the default MAC address. **I have not tested it with newer Owon scopes!**.

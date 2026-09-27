@@ -13,6 +13,8 @@ import json
 import logging
 import os
 
+import analysis
+
 #: Where the settings live when no path is given. Beside the app, so it is easy to
 #: find, edit, and copy to another machine.
 DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scope_setup.json")
@@ -74,6 +76,20 @@ class ScopeSetup:
         # The probe fitted to the input. Does not scale this instrument's readings,
         # so it is recorded rather than applied.
         "probe": "X1",
+        # Where an unattended recording writes, and how often the live loop asks for
+        # a frame. The capture itself takes about half a second, so a shorter
+        # interval changes nothing except how hard the instrument is polled.
+        "record_folder": "",
+        "live_interval_s": 0.5,
+        # How the plot is drawn, and how the spectrum is computed. These are the
+        # vendor software's display options, kept where the rest of the bench
+        # settings are so they survive a restart.
+        "palette": "Dark",
+        "fft_window": "hanning",
+        "fft_format": "dBV",
+        # Each model's own calibration, keyed by the name :IDN? reports. The values
+        # above are the default a model with no section of its own starts from.
+        "per_model": {},
         # The last amplitude a calibration was derived from, kept so the field is
         # filled in next time.
         "known_amplitude": None,
@@ -82,6 +98,11 @@ class ScopeSetup:
     def __init__(self, values=None, path=None):
         self.path = path or DEFAULT_PATH
         self.values = dict(self.DEFAULTS)
+        # The per-model sections are nested, so the shallow copy above is not enough:
+        # sharing that mapping with the class default would let one object's models
+        # appear in the next one made in the same process - which is exactly how a
+        # test passes alone and fails in a suite.
+        self.values["per_model"] = dict(self.DEFAULTS.get("per_model") or {})
         for key, value in (values or {}).items():
             if key not in self.DEFAULTS:
                 # Dropped rather than carried: a file edited by hand or written by a
@@ -108,6 +129,17 @@ class ScopeSetup:
             return None
         return number
 
+    #: The plot palettes; modern_lab draws one per name, and a test keeps the two
+    #: lists equal rather than trusting them to stay in step.
+    PALETTE_NAMES = ("Dark", "Light", "Print")
+
+    #: The settings that belong to a MODEL rather than to a bench. A volts-per-code,
+    #: a probe factor and a calibration trim describe an instrument: a second scope
+    #: on the same machine must not inherit the first one's numbers, which is
+    #: exactly how a plausible-looking factor ends up applied to the wrong unit.
+    CALIBRATION_KEYS = ("calibration_trim", "reference_volts_per_code", "probe",
+                        "known_amplitude")
+
     def coerce(self, key, value):
         """Validate one stored value, warning and falling back to the default."""
         default = self.DEFAULTS.get(key)
@@ -132,9 +164,102 @@ class ScopeSetup:
                 return int(value)
             except (TypeError, ValueError):
                 return default
+        if key == "per_model":
+            # Forgiving: a section that is not a mapping is dropped, and each value in
+            # one is validated by the same rules as the top level.
+            cleaned = {}
+            for model, section in (value or {}).items():
+                if not isinstance(section, dict):
+                    continue
+                entry = {}
+                for sub_key, sub_value in section.items():
+                    if sub_key in self.CALIBRATION_KEYS:
+                        entry[sub_key] = self.coerce(sub_key, sub_value)
+                if entry:
+                    cleaned[str(model).strip().upper()] = entry
+            return cleaned
+        if key == "record_folder":
+            return ("" if value is None else str(value)).strip()
+        if key == "live_interval_s":
+            # A floor rather than a refusal: a capture costs about half a second,
+            # so anything faster is a request the instrument cannot meet anyway.
+            try:
+                seconds = float(value)
+            except (TypeError, ValueError):
+                return default
+            return max(0.05, min(60.0, seconds))
+        if key == "palette":
+            text = ("" if value is None else str(value)).strip()
+            match = [name for name in self.PALETTE_NAMES if name.lower() == text.lower()]
+            return match[0] if match else default
+        if key in ("fft_window", "fft_format"):
+            allowed = analysis.WINDOWS if key == "fft_window" else analysis.FFT_FORMATS
+            text = ("" if value is None else str(value)).strip()
+            match = [name for name in allowed if str(name).lower() == text.lower()]
+            return match[0] if match else default
         return value
 
     # ------------------------------------------------------------------ state
+    # ------------------------------------------------------------------ models
+    def calibration_values(self):
+        """The four settings that describe an instrument, as they stand now."""
+        return {key: self.values.get(key) for key in self.CALIBRATION_KEYS}
+
+    def has_calibration(self):
+        """True when any of them has been set away from its default."""
+        return any(self.values.get(key) != self.DEFAULTS.get(key)
+                   for key in self.CALIBRATION_KEYS)
+
+    def use_model(self, model):
+        """Adopt the settings that belong to this instrument, by name.
+
+        A file written before models were kept apart has one set of calibration
+        values and no model name in it. Rather than lose them, or apply them to
+        whatever is plugged in next, they are given to the first instrument that
+        identifies itself - which on a one-scope bench is the one that wrote them.
+        A model with no section after that starts from the neutral defaults.
+        """
+        name = str(model or "").strip().upper()
+        if not name:
+            return None
+        self.active_model = name
+        sections = self.values.setdefault("per_model", {})
+        if not isinstance(sections, dict):
+            sections = self.values["per_model"] = {}
+        if name not in sections:
+            if not sections and self.has_calibration():
+                # The pre-model file, and this is the instrument it describes.
+                sections[name] = self.calibration_values()
+            else:
+                for key in self.CALIBRATION_KEYS:
+                    self.values[key] = self.DEFAULTS.get(key)
+                sections[name] = self.calibration_values()
+        for key, value in (sections.get(name) or {}).items():
+            if key in self.values:
+                self.values[key] = value
+        return sections.get(name)
+
+    def remember_model(self):
+        """File the current calibration under the active model, ready to be saved."""
+        name = str(getattr(self, "active_model", "") or "").strip().upper()
+        if not name:
+            return None
+        sections = self.values.setdefault("per_model", {})
+        if isinstance(sections, dict):
+            sections[name] = self.calibration_values()
+        return sections.get(name)
+
+    def __getattr__(self, name):
+        """A stored setting reads as an attribute: ``setup.record_folder``.
+
+        Only keys that are actually stored, so a typo raises here rather than
+        handing back None from somewhere far away.
+        """
+        values = self.__dict__.get("values") or {}
+        if name in values:
+            return values[name]
+        raise AttributeError(name)
+
     @property
     def calibration_trim(self):
         """The factor to apply, or None when the decode should stay untrimmed."""
@@ -148,8 +273,9 @@ class ScopeSetup:
     def as_text(self):
         """One line for the log: what this bench is set to."""
         trim = self.calibration_trim
-        return ("scope=%s, calibration=%s, reference=%s V/code, probe=%s"
+        return ("scope=%s, model=%s, calibration=%s, reference=%s V/code, probe=%s"
                 % (self.usb_serial or "first attached",
+                   getattr(self, "active_model", None) or "unknown",
                    "untrimmed" if trim is None else "x%.6g" % trim,
                    self.values.get("reference_volts_per_code") or "module default",
                    self.values.get("probe")))
@@ -181,6 +307,9 @@ class ScopeSetup:
     def save(self, path=None):
         """Write the settings. Returns True on success."""
         target = path or self.path
+        # The calibration finally lives under the model it was measured on, so the
+        # file says which instrument its numbers describe.
+        self.remember_model()
         payload = dict(self.values)
         payload["version"] = SETTINGS_VERSION
         try:

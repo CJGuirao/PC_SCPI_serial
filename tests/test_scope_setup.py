@@ -223,5 +223,75 @@ class DeviceLabelTests(unittest.TestCase):
         self.assertIn("no serial", device_label(None))
 
 
+class PerModelTests(unittest.TestCase):
+    """Calibration belongs to an instrument, not to a machine."""
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory(prefix="per-model-")
+        self.addCleanup(self._dir.cleanup)
+
+    def path(self):
+        return os.path.join(self._dir.name, "scope_setup.json")
+
+    def test_a_pre_model_file_gives_its_numbers_to_the_first_instrument(self):
+        # What this bench looks like today: one trim, and no model name anywhere in
+        # the file. It describes the instrument that wrote it, which is the one that
+        # then identifies itself.
+        setup = ScopeSetup({"calibration_trim": 0.968992, "known_amplitude": 25.0}, path=self.path())
+        setup.use_model("HDS271")
+        self.assertAlmostEqual(setup.values["calibration_trim"], 0.968992)
+        self.assertAlmostEqual(setup.values["per_model"]["HDS271"]["calibration_trim"], 0.968992)
+        setup.save()
+        stored = json.loads(open(self.path(), encoding="utf-8").read())
+        self.assertAlmostEqual(stored["per_model"]["HDS271"]["calibration_trim"], 0.968992)
+
+    def test_a_second_model_does_not_inherit_the_first_ones_calibration(self):
+        setup = ScopeSetup({"calibration_trim": 0.968992}, path=self.path())
+        setup.use_model("HDS271")
+        setup.use_model("HDS2062")
+        self.assertIsNone(setup.calibration_trim)
+
+    def test_coming_back_to_a_model_finds_its_numbers_again(self):
+        setup = ScopeSetup({"calibration_trim": 0.968992}, path=self.path())
+        setup.use_model("HDS271")
+        setup.use_model("HDS2062")
+        setup.values["calibration_trim"] = 1.25
+        setup.remember_model()
+        setup.use_model("HDS271")
+        self.assertAlmostEqual(setup.values["calibration_trim"], 0.968992)
+        setup.use_model("HDS2062")
+        self.assertAlmostEqual(setup.values["calibration_trim"], 1.25)
+
+    def test_two_objects_do_not_share_their_model_sections(self):
+        first = ScopeSetup({"calibration_trim": 0.968992}, path=self.path())
+        first.use_model("HDS271")
+        second = ScopeSetup({}, path=self.path())
+        self.assertEqual(second.values["per_model"], {})
+
+    def test_an_empty_model_name_changes_nothing(self):
+        setup = ScopeSetup({"calibration_trim": 0.968992}, path=self.path())
+        self.assertIsNone(setup.use_model(""))
+        self.assertAlmostEqual(setup.values["calibration_trim"], 0.968992)
+        self.assertEqual(setup.values["per_model"], {})
+
+    def test_the_model_name_is_upper_cased_so_the_key_does_not_drift(self):
+        setup = ScopeSetup({}, path=self.path())
+        setup.use_model("hds271")
+        self.assertIn("HDS271", setup.values["per_model"])
+
+    def test_a_damaged_section_is_dropped_rather_than_loaded(self):
+        setup = ScopeSetup({"per_model": {"HDS271": "not a mapping",
+                                          "HDS2062": {"calibration_trim": "0.5",
+                                                      "nonsense": 3}}}, path=self.path())
+        self.assertNotIn("HDS271", setup.values["per_model"])
+        self.assertAlmostEqual(setup.values["per_model"]["HDS2062"]["calibration_trim"], 0.5)
+        self.assertNotIn("nonsense", setup.values["per_model"]["HDS2062"])
+
+    def test_the_log_line_names_the_model(self):
+        setup = ScopeSetup({}, path=self.path())
+        setup.use_model("HDS271")
+        self.assertIn("model=HDS271", setup.as_text())
+
+
 if __name__ == "__main__":
     unittest.main()

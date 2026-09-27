@@ -4,13 +4,15 @@ import queue
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk
+from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
 
 from PIL import Image, ImageTk
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.ticker import AutoMinorLocator, MaxNLocator
 
+import analysis
+import waveform_export
 from scope_setup import PROBE_CHOICES, ScopeSetup, device_label
 
 PANEL = "#d5d4cf"
@@ -43,6 +45,29 @@ LIVE_CALIBRATE_EVERY = 8
 #: instrument's own front panel can go unnoticed by the plot.
 LIVE_HEADER_EVERY = 12
 
+
+#: What the plot can show. The same capture feeds all of them; only the drawing
+#: changes, so switching view never costs a trip to the instrument.
+VIEWS = ("time", "fft", "math", "xy")
+
+VIEW_LABELS = (("time", "TIME"), ("fft", "FFT"), ("math", "MATH"), ("xy", "XY"))
+
+#: Plot colours. Dark is what the panel uses; Print is for an exported figure,
+#: where a wall of dark pixels is the wrong thing to hand somebody.
+PALETTES = {
+    "Dark": {"face": SCREEN, "grid": "#526060", "text": "#94a5a5",
+             "trace1": "#ffe33e", "trace2": "#26d7e8", "math": "#c792ea"},
+    "Light": {"face": "#fbfbf7", "grid": "#c9cdc7", "text": "#3c4646",
+              "trace1": "#b58900", "trace2": "#007f9e", "math": "#7a51c2"},
+    "Print": {"face": "#ffffff", "grid": "#d8dad4", "text": "#333333",
+              "trace1": "#111111", "trace2": "#555555", "math": "#777777"},
+}
+
+#: The horizontal cursors are the two the analysis layer can read a difference from.
+CURSOR_TARGETS = (("t1", "V1"), ("t2", "V2"), ("v1", "H1"), ("v2", "H2"))
+
+#: How close, in pixels, a press has to be to pick up a marker rather than place one.
+CURSOR_GRAB_PIXELS = 9.0
 
 class Rotary(tk.Canvas):
     """A focusable detented encoder: drag up/right, wheel, or arrow keys."""
@@ -130,6 +155,25 @@ class ModernLabUI:
         self._framing_signature = None
         self._drawer_open = False
         self._vars = {}
+        #: Which view the plot is showing, and the settings each view needs.
+        self._view = "time"
+        self._view_buttons = {}
+        saved = getattr(getattr(self, "setup", None), "values", {}) or {}
+        self._palette_name = saved.get("palette") or "Dark"
+        self._fft_options = {"window": saved.get("fft_window") or "hanning",
+                             "format": saved.get("fft_format") or "dBV",
+                             "log": False, "peaks": 5}
+        self._math_options = {"op": "subtract", "second": "CH2"}
+        self._xy_options = {"x": "CH1", "y": "CH2"}
+        #: Cursor positions in data units: two times and two voltages. None means
+        #: the marker is not placed, which is different from being at zero.
+        self._cursors = {"t1": None, "t2": None, "v1": None, "v2": None}
+        self._cursor_target = "t1"
+        self._cursor_buttons = {}
+        self._cursor_artists = {}
+        self._drag_cursor = None
+        #: Set while a capture came from a file rather than the instrument.
+        self._loaded_capture = None
         # Live controls apply shortly after the value settles, so a dragged knob
         # does not flood the instrument with one write per detent.
         self._live_apply = {}
@@ -483,6 +527,7 @@ class ModernLabUI:
         self.canvas = FigureCanvasTkAgg(self.fig, master=parent)
         self.canvas.get_tk_widget().configure(width=400, height=300, highlightthickness=0)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        self._connect_plot_events()
         readouts = tk.Frame(parent, bg=SCREEN)
         readouts.pack(fill="x", pady=(0, 8))
         self._readout_widgets = {}
@@ -496,6 +541,35 @@ class ModernLabUI:
                              font=("Consolas", 10))
             value.pack(side="left", padx=(0, 12))
             self._readout_widgets[ch] = (tag, value)
+        # What the plot shows, and where the cursors are. Both are about reading
+        # the capture, so they sit with the trace rather than in a drawer.
+        strip = tk.Frame(parent, bg="#303638")
+        strip.pack(fill="x", pady=(3, 0))
+        for name, label in VIEW_LABELS:
+            button = self.key(strip, label, (lambda view: lambda: self.set_view(view))(name),
+                              color="#444c4e")
+            button.configure(fg="#f1f3ed", activeforeground=INK, padx=6,
+                             font=("Segoe UI", 8, "bold"))
+            button.pack(side="left", padx=2, pady=2)
+            self._view_buttons[name] = button
+        self._refresh_view_buttons()
+        tk.Label(strip, text="CURSORS", bg="#303638", fg="#8fa3a3",
+                 font=("Segoe UI", 8, "bold")).pack(side="left", padx=(12, 4))
+        for key_name, label in CURSOR_TARGETS:
+            button = self.key(strip, label,
+                              (lambda which: lambda: self.set_cursor_target(which))(key_name),
+                              color="#444c4e")
+            button.configure(fg="#f1f3ed", activeforeground=INK, padx=5,
+                             font=("Segoe UI", 8, "bold"))
+            button.pack(side="left", padx=1, pady=2)
+            self._cursor_buttons[key_name] = button
+        self.key(strip, "CLEAR", self.clear_cursors, color="#444c4e").pack(side="left", padx=2)
+        self._refresh_cursor_buttons()
+        # The readout is the point of the cursors: what two markers measure.
+        self.cursor_text = tk.StringVar(value="Cursors: none placed.")
+        tk.Label(parent, textvariable=self.cursor_text, bg=SCREEN, fg="#9cf0c9",
+                 font=("Consolas", 9), anchor="w").pack(fill="x", padx=12, pady=(4, 0))
+
         keys = tk.Frame(parent, bg="#303638")
         self._display_keys = keys
         keys.pack(fill="x", pady=(5, 0))
@@ -505,9 +579,12 @@ class ModernLabUI:
         for label, command in (
             ("MEASURE", lambda: self.show_drawer(0)),
             ("ACQUIRE", lambda: self.show_drawer(1)),
+            ("ANALYSE", lambda: self.show_drawer(2)),
+            ("TABLE", self.show_table),
             ("SETUP", self.open_setup),
+            ("OPEN", self.open_capture),
             ("FIT", self.auto_scale), ("SAVE", self.save_waveform),
-            ("UTILITY", lambda: self.show_drawer(2))):
+            ("UTILITY", lambda: self.show_drawer(3))):
             button = self.key(keys, label, command, color="#444c4e")
             button.configure(fg="#f1f3ed", activeforeground=INK, padx=4, font=("Segoe UI", 8, "bold"))
             button.pack(side="left", fill="x", expand=True, padx=2, pady=2)
@@ -542,9 +619,13 @@ class ModernLabUI:
         measure = ttk.Frame(self.drawer, padding=8)
         acquire = ttk.Frame(self.drawer, padding=10)
         utility = ttk.Frame(self.drawer, padding=8)
+        analyse = ttk.Frame(self.drawer, padding=8)
         self.drawer.add(measure, text="Measurements")
         self.drawer.add(acquire, text="Acquisition")
+        # Analyse sits before Utility, and the key row's indices rely on that order.
+        self.drawer.add(analyse, text="Analyse")
         self.drawer.add(utility, text="Utility & log")
+        self.build_analysis(analyse)
         self.meas_source = ttk.Combobox(measure, values=("CH1", "CH2"), state="readonly", width=6)
         self.meas_source.set("CH1")
         self.meas_source.pack(side="left", anchor="n", padx=5)
@@ -566,6 +647,14 @@ class ModernLabUI:
                       self.set_dmm_function).pack(pady=1)
         self.selector(multimeter, "dmm_type", ("DC", "AC"), "DC",
                       self.set_dmm_function).pack(pady=1)
+        # Only the functions this instrument actually answers are offered, and that
+        # is found by asking it: the manual documents resistance, diode, continuity
+        # and capacitance for the series, and this unit is silent for all four.
+        self.dmm_mode = tk.StringVar(value="")
+        self.dmm_mode_box = ttk.Combobox(multimeter, textvariable=self.dmm_mode, values=(),
+                                         state="readonly", width=12)
+        self.dmm_mode_box.pack(pady=(4, 1))
+        self.key(multimeter, "SET MODE", self.set_dmm_mode).pack(fill="x", pady=(1, 2))
         self.key(multimeter, "REL", self.toggle_dmm_relative).pack(fill="x", pady=(5, 2))
         ttk.Label(multimeter, textvariable=self.dmm_note, wraplength=150,
                   foreground="#7a4a1e", font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
@@ -656,6 +745,18 @@ class ModernLabUI:
             return False
         return True
 
+    def live_gap_ms(self):
+        """How long to leave between live frames, from the bench settings.
+
+        A capture costs about half a second, so this is a wait rather than a rate:
+        the interval the app actually achieves is measured and shown either way.
+        """
+        try:
+            seconds = float(getattr(self.setup, "values", {}).get("live_interval_s") or 0.5)
+        except (TypeError, ValueError):
+            seconds = 0.5
+        return max(50, int(seconds * 1000))
+
     def watch_framing(self):
         """Notice a framing change made on the instrument and re-read the header.
 
@@ -683,6 +784,309 @@ class ModernLabUI:
 
     def framing_changed(self):
         """Hook for a framing change seen on the instrument. The panel syncs here."""
+
+    # ------------------------------------------------------------------
+    # Views
+    def set_view(self, name):
+        """Switch what the plot shows.
+
+        The capture is untouched - the same samples are drawn as a trace, a
+        spectrum, a maths curve or an XY figure - so switching view never costs a
+        trip to the instrument and works on a file just as well.
+        """
+        name = str(name or "time").lower()
+        if name not in VIEWS:
+            name = "time"
+        self._view = name
+        self._refresh_view_buttons()
+        try:
+            self.plot_waveform()
+        except Exception as exc:
+            self.log("Could not draw the %s view: %s" % (name, exc), "ERROR")
+
+    def _refresh_view_buttons(self):
+        for name, button in (self._view_buttons or {}).items():
+            active = (name == self._view)
+            button.configure(bg=("#f1f3ed" if active else "#444c4e"),
+                             fg=(INK if active else "#f1f3ed"))
+
+    def palette(self):
+        """The colours the plot draws in, by name."""
+        return PALETTES.get(getattr(self, "_palette_name", "Dark") or "Dark", PALETTES["Dark"])
+
+    def set_palette(self, name):
+        """Change the plot's colours, for a screen or for paper."""
+        if name in PALETTES:
+            self._palette_name = name
+        self.style_plot()
+        try:
+            self.plot_waveform()
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Cursors
+    def _connect_plot_events(self):
+        self.canvas.mpl_connect("button_press_event", self._on_plot_press)
+        self.canvas.mpl_connect("motion_notify_event", self._on_plot_motion)
+        self.canvas.mpl_connect("button_release_event", self._on_plot_release)
+
+    def set_cursor_target(self, which):
+        """Choose which marker a click on the plot will place."""
+        if which in self._cursors:
+            self._cursor_target = which
+            self._refresh_cursor_buttons()
+            self.status_var.set("Click the plot to place marker %s" % which.upper())
+
+    def _refresh_cursor_buttons(self):
+        for key_name, button in (self._cursor_buttons or {}).items():
+            chosen = (key_name == self._cursor_target)
+            placed = self._cursors.get(key_name) is not None
+            button.configure(bg=("#9cdc9c" if chosen else "#444c4e"),
+                             fg=(INK if chosen else ("#f1f3ed" if placed else "#8fa3a3")))
+
+    def cursor_positions(self):
+        """The markers, as placed."""
+        return dict(self._cursors)
+
+    def place_cursor(self, which, value):
+        """Put a marker somewhere, in data units. Used by the tests and by reset."""
+        if which in self._cursors and value is not None:
+            self._cursors[which] = float(value)
+        self._refresh_cursor_buttons()
+        self.refresh_marker_lines()
+        self.on_cursors_moved()
+
+    def clear_cursors(self):
+        for key_name in self._cursors:
+            self._cursors[key_name] = None
+        self._refresh_cursor_buttons()
+        self.refresh_marker_lines()
+        self.on_cursors_moved()
+
+    def _on_plot_press(self, event):
+        """Pick up a marker under the press, or place the selected one there."""
+        if getattr(event, "inaxes", None) is None or event.xdata is None or event.ydata is None:
+            return
+        target = self._marker_under(event)
+        if target is None:
+            target = self._cursor_target
+            self._store_cursor(target, event)
+        self._drag_cursor = target
+        self.refresh_marker_lines()
+        self.on_cursors_moved()
+
+    def _on_plot_motion(self, event):
+        if not getattr(self, "_drag_cursor", None):
+            return
+        if getattr(event, "inaxes", None) is None or event.xdata is None or event.ydata is None:
+            return
+        self._store_cursor(self._drag_cursor, event)
+        self.refresh_marker_lines()
+        self.on_cursors_moved()
+
+    def _on_plot_release(self, event):
+        self._drag_cursor = None
+
+    def _store_cursor(self, which, event):
+        """A time marker takes the x of the click, a voltage marker takes the y."""
+        if which in ("t1", "t2"):
+            self._cursors[which] = float(event.xdata)
+        elif which in ("v1", "v2"):
+            self._cursors[which] = float(event.ydata)
+        self._refresh_cursor_buttons()
+
+    def _marker_under(self, event):
+        """The placed marker whose line is closest to the press, within a few pixels.
+
+        Pixels rather than data units: a marker has to be grabbable at any zoom,
+        and a tolerance in volts would be unusable at one scale and unusable the
+        other way at the next.
+        """
+        best, best_distance = None, CURSOR_GRAB_PIXELS
+        for which, value in self._cursors.items():
+            if value is None:
+                continue
+            if which in ("t1", "t2"):
+                pixel = self.ax.transData.transform((value, self.ax.get_ylim()[0]))[0]
+                distance = abs(pixel - event.x)
+            else:
+                pixel = self.ax.transData.transform((self.ax.get_xlim()[0], value))[1]
+                distance = abs(pixel - event.y)
+            if distance <= best_distance:
+                best, best_distance = which, distance
+        return best
+
+    def refresh_marker_lines(self):
+        """Draw the placed markers, and report what they measure.
+
+        The artists are rebuilt whenever the axes are cleared, which is why this is
+        called at the end of every plot rather than once at start-up.
+        """
+        colours = {"t1": "#9cdc9c", "t2": "#9cdc9c", "v1": "#ffb86b", "v2": "#ffb86b"}
+        self._cursor_artists = {}
+        for which, value in (self._cursors or {}).items():
+            if value is None:
+                continue
+            if which in ("t1", "t2"):
+                artist = self.ax.axvline(value, color=colours[which], linewidth=1.1,
+                                         linestyle="--", alpha=0.95)
+                label = "%s %s" % (which.upper(), analysis.format_seconds(value))
+                self.ax.annotate(label, xy=(value, 1.0), xycoords=("data", "axes fraction"),
+                                 xytext=(3, -10), textcoords="offset points",
+                                 color=colours[which], fontsize=8, fontweight="bold")
+            else:
+                artist = self.ax.axhline(value, color=colours[which], linewidth=1.1,
+                                         linestyle="--", alpha=0.95)
+                label = "%s %s" % (which.upper(), analysis.format_volts(value))
+                self.ax.annotate(label, xy=(0.0, value), xycoords=("axes fraction", "data"),
+                                 xytext=(4, 0), textcoords="offset points",
+                                 color=colours[which], fontsize=8, fontweight="bold")
+            self._cursor_artists[which] = artist
+        self.canvas.draw_idle()
+
+    def on_cursors_moved(self):
+        """A marker moved: the readout is the app's to compute, since it has the traces."""
+        return None
+
+    # ------------------------------------------------------------------
+    # The analysis drawer
+    def build_analysis(self, parent):
+        """The controls for what the analysis layer computes, and for reading it."""
+        spectrum = ttk.Frame(parent, padding=(8, 4, 8, 4))
+        spectrum.pack(side="left", anchor="n", padx=6)
+        ttk.Label(spectrum, text="SPECTRUM", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        row = ttk.Frame(spectrum)
+        row.pack(anchor="w", pady=2)
+        for label, name, values, command in (
+            ("Window", "fft_window", analysis.WINDOWS, self.set_fft_option),
+            ("Format", "fft_format", analysis.FFT_FORMATS, self.set_fft_option)):
+            ttk.Label(row, text=label).pack(side="left", padx=(0, 3))
+            box = ttk.Combobox(row, values=values, state="readonly", width=9)
+            current = self._fft_options["window" if name == "fft_window" else "format"]
+            box.set(current if current in values else values[0])
+            box.pack(side="left", padx=(0, 8))
+            box.bind("<<ComboboxSelected>>",
+                     (lambda key, widget: lambda event: command(key, widget.get()))(name, box))
+        peaks = ttk.Frame(spectrum)
+        peaks.pack(anchor="w", pady=2)
+        self.fft_log = tk.BooleanVar(value=bool(self._fft_options.get("log")))
+        tk.Checkbutton(peaks, text="Log frequency", variable=self.fft_log, bg=PANEL, fg=INK,
+                       selectcolor=PANEL, activebackground=PANEL,
+                       command=lambda: self.set_fft_option("log", self.fft_log.get())).pack(side="left")
+        self.key(peaks, "PEAKS", self.report_peaks).pack(side="left", padx=6)
+
+        maths = ttk.Frame(parent, padding=(8, 4, 8, 4))
+        maths.pack(side="left", anchor="n", padx=6)
+        ttk.Label(maths, text="MATHS", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        row = ttk.Frame(maths)
+        row.pack(anchor="w", pady=2)
+        ttk.Label(row, text="Op").pack(side="left", padx=(0, 3))
+        op_box = ttk.Combobox(row, values=analysis.MATH_OPS, state="readonly", width=9)
+        op_box.set(self._math_options.get("op", "subtract"))
+        op_box.pack(side="left", padx=(0, 8))
+        op_box.bind("<<ComboboxSelected>>",
+                    lambda event: self.set_math_option("op", op_box.get()))
+        ttk.Label(row, text="with").pack(side="left", padx=(0, 3))
+        second_box = ttk.Combobox(row, values=("CH1", "CH2", "CH3", "CH4"), state="readonly", width=5)
+        second_box.set(self._math_options.get("second", "CH2"))
+        second_box.pack(side="left")
+        second_box.bind("<<ComboboxSelected>>",
+                        lambda event: self.set_math_option("second", second_box.get()))
+
+        tools = ttk.Frame(parent, padding=(8, 4, 8, 4))
+        tools.pack(side="left", anchor="n", padx=6)
+        ttk.Label(tools, text="READ & SEND", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        row = ttk.Frame(tools)
+        row.pack(anchor="w", pady=2)
+        self.key(row, "DATA TABLE", self.show_table).pack(side="left", padx=2)
+        self.key(row, "OPEN FILE", self.open_capture).pack(side="left", padx=2)
+        self.key(row, "SCPI", self.open_console, color="#9cd4e8").pack(side="left", padx=2)
+        row = ttk.Frame(tools)
+        row.pack(anchor="w", pady=2)
+        self.key(row, "TRIGGER…", self.open_trigger_state).pack(side="left", padx=2)
+        self.key(row, "AUTO TIME", self.software_autoset, color="#9cdc9c").pack(side="left", padx=2)
+        row = ttk.Frame(tools)
+        row.pack(anchor="w", pady=2)
+        self.record_var = tk.BooleanVar(value=False)
+        self.key(row, "RECORD", self.toggle_recording, color="#ffd166").pack(side="left", padx=2)
+        self.record_label = tk.StringVar(value="idle")
+        tk.Label(row, textvariable=self.record_label, bg=PANEL, fg="#7a6a2e",
+                 font=("Segoe UI", 8)).pack(side="left", padx=6)
+
+        # The spectrum and maths options are read back by the app when it draws.
+        self.spectrum_text = self.text_area(parent)
+
+    def set_fft_option(self, key, value):
+        self._fft_options[key] = value
+        if self._view == "fft":
+            self.set_view("fft")
+        else:
+            self.status_var.set("FFT %s: %s (shown in the FFT view)" % (key, value))
+
+    def set_math_option(self, key, value):
+        self._math_options[key] = value
+        if self._view == "math":
+            self.set_view("math")
+
+    # ------------------------------------------------------------------
+    # Dialogs
+    def show_table(self):
+        """The samples as a table: the view a spreadsheet would give, in the app."""
+        columns, rows = self.table_data()
+        if not rows:
+            messagebox.showinfo("Data table", "No capture to show. Take one first.")
+            return
+        CaptureTableDialog(self.root, columns, rows, on_save=self.save_waveform)
+
+    def open_capture(self):
+        """Read a capture back from a file, the way the vendor's player does."""
+        path = filedialog.askopenfilename(
+            title="Open a capture", filetypes=[("Capture files", "*.csv *.json"),
+                                               ("CSV", "*.csv"), ("JSON", "*.json"),
+                                               ("All files", "*.*")])
+        if path:
+            self.load_capture_file(path)
+
+    def open_console(self):
+        """A console for the instrument's own command language.
+
+        Read-only until the operator says otherwise: this is the tool that
+        established how this dialect behaves, and it can also set the instrument
+        into states that a capture will then report as broken.
+        """
+        ScpiConsoleDialog(self.root, on_send=self.run_scpi_command, scope=self.scope)
+
+    def open_trigger_state(self):
+        """What the instrument says its trigger is doing, right now."""
+        ReadoutDialog(self.root, "Trigger and acquisition", self.trigger_state_rows,
+                      on_refresh=self.refresh_trigger_state)
+
+    # ------------------------------------------------------------------
+    # Placeholders the app fills in
+    def report_peaks(self):
+        return None
+
+    def table_data(self):
+        return [], []
+
+    def load_capture_file(self, path):
+        return None
+
+    def run_scpi_command(self, text, allow_writes):
+        return "not connected"
+
+    def trigger_state_rows(self):
+        return []
+
+    def refresh_trigger_state(self):
+        return None
+
+    def software_autoset(self):
+        return None
+
+    def toggle_recording(self):
+        return None
 
     def download_waveform(self, reuse_header=False):
         """Start a capture on a worker thread.
@@ -727,6 +1131,9 @@ class ModernLabUI:
             if success:
                 self.refresh_cursors()
                 self.plot_waveform()
+                # Unattended recording, if it is on: one file per frame, written
+                # here so what is saved is what was just drawn.
+                self.record_capture()
                 if self.auto_refresh_var.get():
                     # Show the rate actually achieved rather than the rate asked
                     # for: a capture is instrument-limited, so the honest figure
@@ -762,7 +1169,7 @@ class ModernLabUI:
                     self.watch_framing()
                 reuse = (self._live_frames % LIVE_HEADER_EVERY) != 0
                 self._live_timer = self.root.after(
-                    LIVE_GAP_MS, lambda: self.download_waveform(reuse_header=reuse))
+                    self.live_gap_ms(), lambda: self.download_waveform(reuse_header=reuse))
         if not self._closing or self._busy:
             self._poll_timer = self.root.after(80, self.poll_capture)
             # The multimeter is read on the same timer, but far less often: one
@@ -797,6 +1204,186 @@ class ModernLabUI:
         self._live_apply.clear()
         self.scope.disconnect()
         self.root.destroy()
+
+
+class CaptureTableDialog(tk.Toplevel):
+    """The capture as a table of numbers.
+
+    A Treeview with every sample in it would take seconds to fill for a saved
+    deep-memory file, so the display is capped and says so: the export is where
+    the whole record goes.
+    """
+
+    #: Rows shown before the display stops filling itself.
+    DISPLAY_LIMIT = 4000
+
+    def __init__(self, parent, columns, rows, on_save=None):
+        super().__init__(parent)
+        self.title("Data table")
+        self.configure(bg=PANEL)
+        self.transient(parent)
+        self.rows = list(rows)
+        frame = tk.Frame(self, bg=PANEL)
+        frame.pack(fill="both", expand=True, padx=10, pady=10)
+        tree = ttk.Treeview(frame, columns=list(columns), show="headings", height=20)
+        for column in columns:
+            tree.heading(column, text=column)
+            tree.column(column, width=118, anchor="e", stretch=True)
+        shown = self.rows[:self.DISPLAY_LIMIT]
+        for row in shown:
+            tree.insert("", "end", values=row)
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        note = ("%d rows" % len(self.rows)) if len(self.rows) <= self.DISPLAY_LIMIT else (
+            "showing the first %d of %d rows - save the capture for the whole record"
+            % (self.DISPLAY_LIMIT, len(self.rows)))
+        tk.Label(self, text=note, bg=PANEL, fg="#5c6464",
+                 font=("Segoe UI", 8)).pack(anchor="w", padx=12)
+        buttons = tk.Frame(self, bg=PANEL)
+        buttons.pack(fill="x", padx=10, pady=(4, 10))
+        if on_save is not None:
+            ttk.Button(buttons, text="Save capture…", command=on_save).pack(side="left")
+        ttk.Button(buttons, text="Close", command=self.destroy).pack(side="right")
+
+
+class ScpiConsoleDialog(tk.Toplevel):
+    """Send the instrument its own command language and read what comes back.
+
+    Read-only until the operator ticks the box: a write can leave the instrument
+    in a state a later capture reports as broken, which is exactly how the
+    volts/div write behaved on this unit.
+    """
+
+    PLACEHOLDER = "e.g.  *IDN?   :CHANnel1:SCALe?   :MEAS:VPP?"
+
+    def __init__(self, parent, on_send, scope=None):
+        super().__init__(parent)
+        self.title("SCPI console")
+        self.configure(bg=PANEL)
+        self.transient(parent)
+        self.geometry("640x420")
+        self.on_send = on_send
+        self.scope = scope
+        self.history = []
+        self.history_at = 0
+
+        header = tk.Frame(self, bg=PANEL)
+        header.pack(fill="x", padx=10, pady=(10, 2))
+        self.info = tk.StringVar(value=self.identity())
+        tk.Label(header, textvariable=self.info, bg=PANEL, fg="#4a5252",
+                 font=("Segoe UI", 8)).pack(anchor="w")
+        self.allow_writes = tk.BooleanVar(value=False)
+        tk.Checkbutton(header, text="Allow writes (a write can change the instrument)",
+                       variable=self.allow_writes, bg=PANEL, fg="#8a4a1e",
+                       selectcolor=PANEL, activebackground=PANEL,
+                       font=("Segoe UI", 8)).pack(anchor="w")
+
+        body = tk.Frame(self, bg=PANEL)
+        body.pack(fill="both", expand=True, padx=10)
+        self.log = tk.Text(body, bg=SCREEN, fg="#c4d6d2", font=("Consolas", 9),
+                           bd=0, padx=9, pady=6, wrap="word")
+        scroll = ttk.Scrollbar(body, orient="vertical", command=self.log.yview)
+        self.log.configure(yscrollcommand=scroll.set)
+        self.log.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.log.configure(state="disabled")
+
+        entry_row = tk.Frame(self, bg=PANEL)
+        entry_row.pack(fill="x", padx=10, pady=(6, 10))
+        tk.Label(entry_row, text="Command", bg=PANEL, fg=INK,
+                 font=("Segoe UI", 9)).pack(side="left")
+        self.entry = ttk.Entry(entry_row, width=46)
+        self.entry.pack(side="left", fill="x", expand=True, padx=6)
+        self.entry.bind("<Return>", lambda event: self.send())
+        self.entry.bind("<Up>", lambda event: self.recall(-1))
+        self.entry.bind("<Down>", lambda event: self.recall(1))
+        ttk.Button(entry_row, text="Send", command=self.send).pack(side="left")
+        self.entry.focus_set()
+        self.write("Type a query and press Enter. Up and Down recall what you sent.")
+
+    def identity(self):
+        """Who is on the other end, if anything."""
+        if self.scope is None:
+            return "Not connected"
+        model = getattr(self.scope, "model", "") or "?"
+        serial = getattr(self.scope, "serial_number", "") or "?"
+        firmware = getattr(self.scope, "firmware", "") or "?"
+        return "%s  S/N %s  firmware %s" % (model, serial, firmware)
+
+    def write(self, text, colour=None):
+        self.log.configure(state="normal")
+        self.log.insert("end", text + "\n")
+        self.log.see("end")
+        self.log.configure(state="disabled")
+
+    def recall(self, direction):
+        if not self.history:
+            return "break"
+        self.history_at = max(0, min(len(self.history), self.history_at + direction))
+        self.entry.delete(0, "end")
+        if self.history_at < len(self.history):
+            self.entry.insert(0, self.history[-1 - self.history_at])
+        return "break"
+
+    def send(self):
+        text = self.entry.get().strip()
+        if not text:
+            return
+        self.history.append(text)
+        self.history_at = 0
+        self.entry.delete(0, "end")
+        self.write("> " + text)
+        try:
+            reply = self.on_send(text, self.allow_writes.get())
+        except Exception as exc:                                  # never take the window down
+            reply = "failed: %s" % exc
+        self.write("< " + str(reply))
+
+
+class ReadoutDialog(tk.Toplevel):
+    """A read-only list of what the instrument says, with a Refresh.
+
+    The rows come from a provider rather than being pushed in, so what is on
+    screen is what was just asked for.
+    """
+
+    def __init__(self, parent, title, provider, on_refresh=None):
+        super().__init__(parent)
+        self.title(title)
+        self.configure(bg=PANEL)
+        self.transient(parent)
+        self.provider = provider
+        self.on_refresh = on_refresh
+        self.body = tk.Frame(self, bg=PANEL)
+        self.body.pack(fill="both", expand=True, padx=12, pady=12)
+        self.rows = {}
+        buttons = tk.Frame(self, bg=PANEL)
+        buttons.pack(fill="x", padx=12, pady=(0, 12))
+        ttk.Button(buttons, text="Refresh", command=self.refresh).pack(side="left")
+        ttk.Button(buttons, text="Close", command=self.destroy).pack(side="right")
+        self.refresh()
+
+    def refresh(self):
+        if self.on_refresh is not None:
+            try:
+                self.on_refresh()
+            except Exception:
+                pass
+        try:
+            rows = list(self.provider() or [])
+        except Exception as exc:
+            rows = [("error", str(exc))]
+        for widget in self.body.winfo_children():
+            widget.destroy()
+        for index, (label, value) in enumerate(rows):
+            tk.Label(self.body, text=str(label), bg=PANEL, fg="#5c6464",
+                     font=("Segoe UI", 9), anchor="w").grid(row=index, column=0,
+                                                            sticky="w", padx=(0, 18), pady=1)
+            tk.Label(self.body, text=str(value), bg=PANEL, fg=INK,
+                     font=("Consolas", 10), anchor="w").grid(row=index, column=1,
+                                                             sticky="w", pady=1)
 
 
 class SetupDialog(tk.Toplevel):
@@ -892,6 +1479,50 @@ class SetupDialog(tk.Toplevel):
                  font=("Segoe UI", 8)).grid(row=row, column=1, columnspan=2, sticky="w")
         row += 1
 
+        # -- workbench: where a recording goes, and how the plot and spectrum look
+        self.record_folder = tk.StringVar(value=self.setup.values.get("record_folder") or "")
+        tk.Label(body, text="Record folder", bg="#202628", fg="#f1f3ed", anchor="w",
+                 font=("Segoe UI", 9)).grid(row=row, column=0, sticky="w", pady=(8, 0))
+        tk.Entry(body, textvariable=self.record_folder, bg="#0f1416", fg=YELLOW,
+                 insertbackground=YELLOW, relief="flat", width=30,
+                 font=("Consolas", 9)).grid(row=row, column=1, sticky="w", pady=(8, 0))
+        tk.Button(body, text="Browse…", command=self.choose_record_folder, bg="#444c4e",
+                  fg="#f1f3ed", relief="flat", padx=6,
+                  cursor="hand2").grid(row=row, column=2, padx=(6, 0), pady=(8, 0))
+        row += 1
+        tk.Label(body, text="RECORD on the Analyse tab writes every capture here, one CSV per\n"
+                            "frame, with the settings that made its numbers true.",
+                 bg="#202628", fg="#9fb0b3", justify="left", anchor="w",
+                 font=("Segoe UI", 8)).grid(row=row, column=1, columnspan=2, sticky="w")
+        row += 1
+
+        self.live_interval = tk.StringVar(
+            value=self._format(self.setup.values.get("live_interval_s"), blank="0.5"))
+        self.palette_choice = tk.StringVar(value=self.setup.values.get("palette") or "Dark")
+        self.fft_window_choice = tk.StringVar(value=self.setup.values.get("fft_window") or "hanning")
+        self.fft_format_choice = tk.StringVar(value=self.setup.values.get("fft_format") or "dBV")
+        for label, variable, values in (
+            ("Live interval (s)", self.live_interval, None),
+            ("Plot palette", self.palette_choice, list(ScopeSetup.PALETTE_NAMES)),
+            ("FFT window", self.fft_window_choice, list(analysis.WINDOWS)),
+            ("FFT format", self.fft_format_choice, list(analysis.FFT_FORMATS)),
+        ):
+            tk.Label(body, text=label, bg="#202628", fg="#f1f3ed", anchor="w",
+                     font=("Segoe UI", 9)).grid(row=row, column=0, sticky="w", pady=(6, 0))
+            if values is None:
+                tk.Entry(body, textvariable=variable, bg="#0f1416", fg=YELLOW,
+                         insertbackground=YELLOW, relief="flat", width=18,
+                         font=("Consolas", 10)).grid(row=row, column=1, sticky="w", pady=(6, 0))
+            else:
+                ttk.Combobox(body, textvariable=variable, values=values, state="readonly",
+                             width=12).grid(row=row, column=1, sticky="w", pady=(6, 0))
+            row += 1
+        tk.Label(body, text="The interval is the gap between live frames; a capture itself costs\n"
+                            "about half a second, so the rate actually achieved is shown live.",
+                 bg="#202628", fg="#9fb0b3", justify="left", anchor="w",
+                 font=("Segoe UI", 8)).grid(row=row, column=1, columnspan=2, sticky="w")
+        row += 1
+
         self.status = tk.StringVar(value="")
         tk.Label(body, textvariable=self.status, bg="#202628", fg="#8fe28f", anchor="w",
                  justify="left", font=("Consolas", 8), wraplength=430).grid(
@@ -976,7 +1607,18 @@ class SetupDialog(tk.Toplevel):
             "reference_volts_per_code": self.reference.get(),
             "probe": self.probe.get(),
             "known_amplitude": self.amplitude.get(),
+            "record_folder": self.record_folder.get(),
+            "live_interval_s": self.live_interval.get(),
+            "palette": self.palette_choice.get(),
+            "fft_window": self.fft_window_choice.get(),
+            "fft_format": self.fft_format_choice.get(),
         }, path=self.setup.path)
+
+    def choose_record_folder(self):
+        """Pick the folder unattended recordings are written to."""
+        chosen = filedialog.askdirectory(title="Where should recordings go?")
+        if chosen:
+            self.record_folder.set(chosen)
 
     def save_and_apply(self):
         if self.on_apply:
