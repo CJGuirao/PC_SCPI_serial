@@ -70,6 +70,9 @@ class App(ModernLabUI):
         self._display_scale = {}
         #: The panel's own vertical position per channel, in volts at the input.
         self._display_offset = {}
+        #: Where each trace's 0 V sits, as last drawn: the panel's position control
+        #: applied, per channel.
+        self._zero_marks = []
         self._display_scale_is_auto = {}
         #: The probe convention the trace is SHOWN in, per channel. Unset means the
         #: instrument's own, and the trace is then drawn in tip volts.
@@ -1851,6 +1854,9 @@ class App(ModernLabUI):
         self.ax.set_xlabel(f"Time ({unit})")
 
         plotted = False
+        # (name, colour, where this trace's zero sits, volts per row of the grid),
+        # for the 0 V markers drawn with the graticule below.
+        references = []
         for channel in channels:
             name = str(channel.get("name", "CH1")).upper()
             color = palette.get(name, "#9cdc9c")
@@ -1870,6 +1876,9 @@ class App(ModernLabUI):
             x = np.arange(y.size, dtype=float) * float(channel.get("point_interval", 1.0) or 1.0) * factor
             self.ax.plot(x, y, color=color, linewidth=1.4)
             plotted = True
+            references.append((name, color,
+                               self.display_offset(number) if number else 0.0,
+                               self.display_scale_value(number, channel) if number else None))
 
         # The vertical frame comes from the instrument's own framing, so the trace
         # is drawn at the size the scope is showing it.
@@ -1890,6 +1899,7 @@ class App(ModernLabUI):
         else:
             self.show_graticule(framing, window, unit, factor)
         self.draw_reference_lines(plotted)
+        self.draw_zero_markers(references if plotted else [])
         self.canvas.draw_idle()
         self._plot_cache = channels
         self.sync_vertical_controls()
@@ -1999,6 +2009,40 @@ class App(ModernLabUI):
         if isinstance(position, (int, float)) and position:
             self.ax.set_title("HPOS %s" % self.timebase_position_text(position),
                               color="#7bd6ff", fontsize=8, loc="right", pad=6)
+
+    def draw_zero_markers(self, references):
+        """A 0 V marker per enabled channel: the point that trace refers to.
+
+        The waveform refers to this: a trace with no position applied has its zero
+        on the middle row of the grid, and a trace that has been moved carries its
+        zero with it. This is the only place the applied position is visible, since
+        the grid deliberately does not move with it - and it is also what a peak is
+        counted from, so a peak-to-peak read off the screen has a reference to
+        start at.
+
+        Drawn the way an instrument draws its ground reference: a thin dotted line
+        across the graticule in the channel's own colour, labelled at the edge, CH1
+        on the left and CH2 on the right so two traces cannot label over each
+        other. Nothing here touches the frame - the marker moves, the grid does not.
+        """
+        self._zero_marks = []
+        for index, (name, colour, offset, volts_per_div) in enumerate(references):
+            right = bool(index % 2)
+            moved = abs(offset) > 1e-12
+            self.ax.axhline(offset, color=colour, linewidth=0.9, alpha=0.7, zorder=1.6,
+                            linestyle=(0, (1.0, 1.6)) if moved else (0, (1.0, 3.4)))
+            label = "%s 0V" % name
+            if moved:
+                label += "  %+.3g V" % offset
+                if volts_per_div:
+                    label += "  (%+.2f div)" % (offset / volts_per_div)
+            self.ax.annotate(label, xy=(1.0 if right else 0.0, offset),
+                             xycoords=("axes fraction", "data"),
+                             xytext=(-5 if right else 5, 0), textcoords="offset points",
+                             color=colour, fontsize=8, va="center",
+                             ha="right" if right else "left",
+                             annotation_clip=False)
+            self._zero_marks.append({"name": name, "offset": offset, "label": label})
 
     def save_waveform(self):
         """Write the capture in whichever format the chosen filename asks for.

@@ -799,6 +799,38 @@ class VerticalFrameTests(PanelTestCase):
         # so no measurement or export can come back different for it.
         self.assertEqual([0.0, 1.0, -1.0], list(channel["waveform_data"]))
 
+    def test_every_enabled_channel_gets_a_zero_marker(self):
+        # The point the trace refers to, and the only place an applied position is
+        # visible - the grid deliberately does not move with it.
+        self.frame_of(self.channel(5.0))
+        marks = self.app._zero_marks
+        self.assertEqual(1, len(marks))
+        self.assertEqual("CH1", marks[0]["name"])
+        self.assertAlmostEqual(0.0, marks[0]["offset"], places=9)
+        self.assertEqual("CH1 0V", marks[0]["label"])
+        # Drawn, not merely remembered.
+        self.assertIn("CH1 0V", [text.get_text() for text in self.app.ax.texts])
+
+    def test_a_moved_trace_carries_its_zero_marker_and_says_how_far(self):
+        self.scope.waveform_data.channels = [self.channel(5.0)]
+        self.app._display_offset[1] = 5.0
+        with patch.object(self.app, "sync_vertical_controls"):
+            self.app.plot_waveform()
+        self.assertIn("CH1 0V  +5 V  (+1.00 div)",
+                      [text.get_text() for text in self.app.ax.texts])
+        self.assertAlmostEqual(5.0, self.app._zero_marks[0]["offset"], places=9)
+        # And the grid is exactly where it was: one row is still 5 V, so the
+        # marker is what tells the two traces apart.
+        low, high = self.app.ax.get_ylim()
+        self.assertAlmostEqual(-20.0, low, places=9)
+        self.assertAlmostEqual(20.0, high, places=9)
+
+    def test_a_channel_with_no_trace_gets_no_marker(self):
+        silent = self.channel(5.0)
+        silent["waveform_data"] = []
+        self.frame_of(self.channel(5.0), silent)
+        self.assertEqual(["CH1"], [mark["name"] for mark in self.app._zero_marks])
+
     def test_a_finer_volts_div_draws_a_taller_trace(self):
         # The whole point of framing on the instrument's screen: a row is the
         # selected volts/div, so the same volts must fill more rows at a finer
