@@ -252,6 +252,7 @@ class App(ModernLabUI):
                 messagebox.showerror("Connection Error",
                                      f"Failed to connect via {conn_type.upper()}")
             self._set_status("Connection failed")
+            self.update_state_indicator()
             return
 
         self.connect_btn.config(text="Disconnect")
@@ -271,13 +272,24 @@ class App(ModernLabUI):
         self.query_all_states()
         self.sync_dmm()
         self.report_trigger_state()
+        # Live as soon as it answers. This is a panel for watching a scope: the
+        # first thing anyone does after connecting is press LIVE, and the first
+        # frame arrives sooner if the panel asks for it itself.
+        self.update_state_indicator()
+        if not self.auto_refresh_var.get():
+            self.toggle_live()
 
     def disconnect_scope(self):
+        # Stop the live loop first: it would otherwise go on asking an instrument
+        # that is no longer there, and would keep the indicator saying LIVE.
+        if self.auto_refresh_var.get():
+            self.toggle_live()
         self.scope.disconnect()
         self.connect_btn.config(text="Connect")
         self.device_info.set("Not Connected")
         self.status_var.set("Ready | Disconnected")
         self.capture_state.set("NO ACQUISITION")
+        self.update_state_indicator()
         self.log("Disconnected")
 
     # ------------------------------------------------------------------

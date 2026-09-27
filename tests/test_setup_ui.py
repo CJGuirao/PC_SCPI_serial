@@ -185,6 +185,14 @@ class DeviceSelectionTests(PanelTestCase):
         self.connect()
         self.scope.connect_usb_hid.assert_called_once_with(serial="25520161")
 
+    def test_connecting_goes_live_straight_away(self):
+        # Watching a scope is what the panel is for: the first frame should not
+        # need a second press.
+        self.connect()
+        self.assertTrue(self.app.auto_refresh_var.get())
+        self.assertEqual("LIVE", self.app.state_word.cget("text"))
+        self.assertEqual("pause", self.app._live_button_kind)
+
     def test_without_a_saved_serial_the_first_attached_one_is_opened(self):
         self.connect()
         self.scope.connect_usb_hid.assert_not_called()

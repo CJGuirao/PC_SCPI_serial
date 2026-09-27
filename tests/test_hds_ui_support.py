@@ -1112,6 +1112,61 @@ class ControlReadbackTests(PanelTestCase):
         self.assertAlmostEqual(0.0, self.app.display_offset(1), places=9)
 
 
+class StateIndicatorTests(PanelTestCase):
+    """The panel says what it is doing: a mode, a rate, and a colour for it."""
+
+    def test_before_anything_is_attached_it_says_offline(self):
+        self.scope.is_connected = False
+        self.app.update_state_indicator()
+        self.assertEqual("pause", self.app._state_face)
+        self.assertEqual("OFFLINE", self.app.state_word.cget("text"))
+        self.assertEqual("", self.app.state_rate.cget("text"))
+
+    def test_a_single_capture_shows_the_hold_icon(self):
+        self.app.capture_state.set("ACQUIRING\u2026")
+        self.assertEqual("refresh", self.app._state_face)
+        self.assertEqual("SINGLE", self.app.state_word.cget("text"))
+
+    def test_live_shows_a_play_icon_and_the_rate(self):
+        self.app._live_period = 0.5
+        self.app.auto_refresh_var.set(True)
+        self.app.update_state_indicator()
+        self.assertEqual("play", self.app._state_face)
+        self.assertEqual("LIVE", self.app.state_word.cget("text"))
+        self.assertEqual("2.0 fps", self.app.state_rate.cget("text"))
+
+    def test_the_rate_is_dropped_when_the_panel_stops(self):
+        self.app._live_period = 0.5
+        self.app.auto_refresh_var.set(True)
+        self.app.update_state_indicator()
+        self.app.auto_refresh_var.set(False)
+        self.app.update_state_indicator()
+        self.assertEqual("", self.app.state_rate.cget("text"))
+
+    def test_the_button_promises_the_other_state(self):
+        # What a transport button is for: it says what pressing it will do.
+        self.assertEqual("play", self.app._live_button_kind)
+        self.app.auto_refresh_var.set(True)
+        self.app.update_live_button()
+        self.assertEqual("pause", self.app._live_button_kind)
+        self.app.auto_refresh_var.set(False)
+        self.app.update_live_button()
+        self.assertEqual("play", self.app._live_button_kind)
+
+    def test_a_capture_from_disk_is_not_called_single(self):
+        self.app.capture_state.set("FILE \u2022 bench.csv")
+        self.assertEqual("refresh", self.app._state_face)
+        self.assertEqual("FILE", self.app.state_word.cget("text"))
+
+    def test_the_icons_are_drawn_not_typed(self):
+        # A pause bar is two bars drawn at the size asked for, not a character the
+        # window manager may substitute for something else.
+        from modern_lab import PAUSE_RED
+        image = self.app.icon("pause", PAUSE_RED)
+        self.assertEqual(16, image.width())
+        self.assertIs(image, self.app.icon("pause", PAUSE_RED))     # drawn once
+
+
 class CaptureHeaderRetryTests(unittest.TestCase):
     """A missed capture header is transient on this firmware, so retry once."""
 

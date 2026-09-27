@@ -9,7 +9,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.ticker import AutoMinorLocator, MaxNLocator
 
@@ -131,6 +131,46 @@ class Rotary(tk.Canvas):
         return "break"
 
 
+#: What the state indicator says, and the colour it says it in: running, a single
+#: capture in hand, or nothing being acquired.
+LIVE_GREEN = "#63d471"
+PAUSE_RED = "#ff6b6b"
+HOLD_AMBER = "#f3bd75"
+
+
+def transport_icon(kind, colour, size=16, scale=4):
+    """Draw a play, pause or refresh glyph as an image.
+
+    Drawn rather than typed: whether a font carries a pause bar, and whether the
+    window manager substitutes something else for it, is not something the state of
+    an acquisition should depend on. Drawn large and reduced, so the edges are
+    clean at the size it is shown.
+    """
+    box = size * scale
+    mid = box / 2.0
+    image = Image.new("RGBA", (box, box), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    if kind == "play":
+        draw.polygon([(mid - 0.30 * box, mid - 0.44 * box),
+                      (mid + 0.44 * box, mid),
+                      (mid - 0.30 * box, mid + 0.44 * box)], fill=colour)
+    elif kind == "pause":
+        bar = 0.21 * box
+        draw.rectangle([mid - 0.42 * box, mid - 0.44 * box,
+                        mid - 0.42 * box + bar, mid + 0.44 * box], fill=colour)
+        draw.rectangle([mid + 0.21 * box, mid - 0.44 * box,
+                        mid + 0.21 * box + bar, mid + 0.44 * box], fill=colour)
+    else:                                                   # refresh
+        radius = 0.38 * box
+        draw.arc([mid - radius, mid - radius, mid + radius, mid + radius],
+                 start=35, end=325, fill=colour, width=max(2, int(0.15 * box)))
+        head = 0.17 * box
+        draw.polygon([(mid + 0.30 * box, mid - radius - head),
+                      (mid + 0.30 * box + head * 1.7, mid - radius + head * 0.5),
+                      (mid + 0.04 * box, mid - radius + head * 0.9)], fill=colour)
+    return ImageTk.PhotoImage(image.resize((size, size), Image.LANCZOS))
+
+
 class ModernLabUI:
     def setup_gui(self):
         self.root.title("Modern Lab • OWON Oscilloscope")
@@ -158,6 +198,11 @@ class ModernLabUI:
         self._live_period = None
         self._live_frames = 0
         self._dmm_tick = 0
+        #: Drawn transport glyphs, kept alive for Tk and drawn once per look.
+        self._state_icons = {}
+        #: What the indicator is showing, and which way the button's glyph points.
+        self._state_face = None
+        self._live_button_kind = None
         #: Last framing signature seen from the instrument, for the live watch.
         self._framing_signature = None
         self._drawer_open = False
@@ -229,9 +274,14 @@ class ModernLabUI:
         self.build_channels(vertical)
         acq = self.group(controls, "ACQUISITION", 2, 0, span=2)
         self.auto_refresh_var = tk.BooleanVar(value=False)
-        self.live_btn = self.key(acq, "LIVE REFRESH", self.toggle_live, color="#9cdc9c")
-        self.live_btn.configure(command=self.toggle_live)
+        # The button is the transport control and says what pressing it will do: a
+        # pause glyph while the panel is capturing, a play glyph while it is not.
+        self.live_btn = tk.Button(acq, command=self.toggle_live, bg="#e9e9e3",
+                                  activebackground="#f4f4ec", relief="raised", bd=2,
+                                  padx=9, pady=5, cursor="hand2", takefocus=True,
+                                  text="LIVE", font=("Segoe UI", 9, "bold"))
         self.live_btn.pack(side="left", expand=True, fill="x", padx=3)
+        self.update_live_button()
         self.key(acq, "CAPTURE", self.download_waveform).pack(side="left", expand=True, fill="x", padx=3)
         # AUTO is the front panel's autoset: find the signal and frame it.
         self.key(acq, "AUTO", self.auto_frame, color="#9cd4e8").pack(side="left", expand=True, fill="x", padx=3)
@@ -544,10 +594,23 @@ class ModernLabUI:
         top = tk.Frame(parent, bg=SCREEN)
         top.pack(fill="x")
         self.capture_state = tk.StringVar(value="NO ACQUISITION")
-        tk.Label(top, textvariable=self.capture_state, bg=SCREEN, fg="#a5b9b5",
-                 font=("Consolas", 10, "bold")).pack(side="left", padx=12, pady=9)
+        # The state of the acquisition at a glance: what is running, how fast this
+        # view is turning over, and a colour that says the same thing without
+        # reading. The word is the mode, the glyph is what is happening in it.
+        self.state_icon = tk.Label(top, bg=SCREEN)
+        self.state_icon.pack(side="left", padx=(12, 6), pady=10)
+        self.state_word = tk.Label(top, text="SINGLE", bg=SCREEN, fg=PAUSE_RED,
+                                   font=("Consolas", 11, "bold"))
+        self.state_word.pack(side="left", pady=10)
+        self.state_rate = tk.Label(top, text="", bg=SCREEN, fg="#7f8c8b",
+                                   font=("Consolas", 9))
+        self.state_rate.pack(side="left", padx=(8, 0), pady=12)
         tk.Label(top, textvariable=self.device_info, bg=SCREEN, fg="#a5b9b5",
                  font=("Segoe UI", 9)).pack(side="right", padx=12)
+        # Every path that changes what the panel is doing writes this variable, so
+        # the indicator follows the variable rather than each of them remembering.
+        self.capture_state.trace_add("write", self.update_state_indicator)
+        self.update_state_indicator()
         self.fig.set_facecolor(SCREEN)
         self.fig.subplots_adjust(left=.085, right=.97, top=.95, bottom=.12)
         self.style_plot(empty=True)
@@ -736,10 +799,73 @@ class ModernLabUI:
             self.trigger_mode.set("SINGle")
             self.set_trigger_mode()
 
+    def icon(self, kind, colour, size=16):
+        """A transport glyph, drawn once per look and kept alive for Tk."""
+        key = (kind, colour, size)
+        image = self._state_icons.get(key)
+        if image is None:
+            image = transport_icon(kind, colour, size)
+            self._state_icons[key] = image
+        return image
+
+    def update_state_indicator(self, *_args):
+        """Say what the panel is doing: the mode, the rate, and a colour for it.
+
+        LIVE is green and playing. A single capture in hand - one shot, AUTO, or a
+        capture in flight - is amber and turning. Neither is red and paused. The
+        rate is the rate this view is being redrawn at, which is the capture round
+        trip; it is not the instrument's sample rate, which is a different number by
+        three orders of magnitude and belongs to the instrument, not to this panel.
+
+        Called from a trace on the state variable as well as directly, because every
+        path that changes what the panel is doing goes through that variable: the
+        indicator follows it instead of each path remembering to say so.
+        """
+        state = str(self.capture_state.get() or "") if hasattr(self, "capture_state") else ""
+        live_on = bool(getattr(self, "auto_refresh_var", None) is not None
+                       and self.auto_refresh_var.get())
+        if live_on:
+            face, colour, word = "play", LIVE_GREEN, "LIVE"
+        elif "FILE" in state.upper():
+            # A capture from disk is not being acquired at all, and saying SINGLE
+            # for it would be a claim about the instrument that is not true.
+            face, colour, word = "refresh", HOLD_AMBER, "FILE"
+        elif not getattr(self.scope, "is_connected", False):
+            face, colour, word = "pause", PAUSE_RED, "OFFLINE"
+        elif state.endswith("\u2026"):
+            face, colour, word = "refresh", HOLD_AMBER, "SINGLE"
+        else:
+            face, colour, word = "pause", PAUSE_RED, "SINGLE"
+
+        self._state_face = face
+        icon = getattr(self, "state_icon", None)
+        if icon is not None:
+            icon.configure(image=self.icon(face, colour))
+        word_label = getattr(self, "state_word", None)
+        if word_label is not None:
+            word_label.configure(text=word, foreground=colour)
+        rate = getattr(self, "state_rate", None)
+        if rate is not None:
+            period = getattr(self, "_live_period", None)
+            # The rate only means anything while the panel is the thing driving
+            # the captures; a stopped panel has no rate to report.
+            rate.configure(text="%.1f fps" % (1.0 / period) if face == "play" and period else "")
+
+    def update_live_button(self):
+        """The button is the transport control: pause when running, play when not."""
+        button = getattr(self, "live_btn", None)
+        if button is None:
+            return
+        running = bool(self.auto_refresh_var.get())
+        kind = "pause" if running else "play"
+        self._live_button_kind = kind
+        button.configure(image=self.icon(kind, PAUSE_RED if running else LIVE_GREEN, 20))
+        self.update_state_indicator()
+
     def toggle_live(self):
         if self.auto_refresh_var.get():
             self.auto_refresh_var.set(False)
-            self.live_btn.configure(text="LIVE REFRESH", bg="#9cdc9c")
+            self.update_live_button()
             if not self._busy:
                 self.capture_state.set("CAPTURED" if self.scope.waveform_data.channels else "NO ACQUISITION")
             if self._live_timer:
@@ -747,7 +873,7 @@ class ModernLabUI:
                 self._live_timer = None
         elif self.ready():
             self.auto_refresh_var.set(True)
-            self.live_btn.configure(text="PAUSE REFRESH", bg="#f3bd75")
+            self.update_live_button()
             # A new run starts with no measured rate, so the label does not show
             # whatever the previous run happened to average.
             self._live_period = None
@@ -1250,6 +1376,9 @@ class ModernLabUI:
                                          else 0.7 * self._live_period + 0.3 * period)
                 self.capture_state.set("LIVE • %.1f s" % self._live_period
                                        if self._live_period else "LIVE")
+                # The rate is measured per frame, so the indicator is refreshed
+                # here rather than only when the state itself changes.
+                self.update_state_indicator()
             else:
                 self.capture_state.set("CAPTURED")
             self.status_var.set("Waveform acquired")
