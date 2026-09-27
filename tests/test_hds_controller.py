@@ -139,10 +139,13 @@ class HdsVerticalDecodeTests(unittest.TestCase):
                                entry["true_volts_per_div"], places=9)
 
     def test_a_known_signal_decodes_to_its_amplitude(self):
-        # The hardware case: 57..233 codes was a 25.6 Vpp signal.
+        # The hardware case: 57..233 codes was a 25.6 Vpp signal. The middle sample
+        # keeps every step inside the range the codes can resolve - a bare [57, 233]
+        # is two extremes 176 codes apart, which is not a step any real pair of
+        # adjacent samples can take and is left alone by unwrap_codes.
         waveform = WaveformData()
         waveform.parse_hds_capture(hds_header("5v", probe="10x"),
-                                   {"CH1": hds_payload([57, 233])},
+                                   {"CH1": hds_payload([57, 145, 233])},
                                    calibrated_volts_per_code=25.6 / 176.0)
         entry = waveform.channels[0]
         volts = entry["waveform_data"]
@@ -245,6 +248,71 @@ class HdsVerticalDecodeTests(unittest.TestCase):
         entry = self.decode(None)
         self.assertIsNone(entry["volts_per_div"])
         self.assertEqual("V", entry["units"])
+
+
+class WrappedCodeTests(unittest.TestCase):
+    """A signal across the 0/255 boundary must be made continuous.
+
+    Measured on this unit with a 2.5 Vpp 1 kHz sine: the screen payload carried
+    ..., 12, 4, 252, 245, ... - a step of -8 codes, not -248 - so the raw codes are a
+    sawtooth-shaped jump every time the signal passes the boundary. Read as absolute
+    values that draws a vertical break through the middle of every cycle and fits the
+    calibration to the 248-code wrap instead of the signal, which is how a 2.60 V
+    input came to be drawn and measured as 3.52 V.
+    """
+
+    SINE_CYCLES, SINE_SAMPLES, SINE_AMPLITUDE = 6, 50, 65
+
+    def wrapped_sine(self):
+        """A sine centred on the code boundary, as it arrives off the instrument."""
+        import math
+        return [int(round(self.SINE_AMPLITUDE * math.sin(2 * math.pi * i / self.SINE_SAMPLES)))
+                % 256 for i in range(self.SINE_CYCLES * self.SINE_SAMPLES)]
+
+    def decode(self, codes, volts_per_code):
+        waveform = WaveformData()
+        waveform.parse_hds_capture(hds_header("500mv"),
+                                   {"CH1": hds_payload(codes)},
+                                   calibrated_volts_per_code=volts_per_code)
+        return waveform.channels[0]
+
+    def test_a_step_across_the_boundary_is_read_as_a_small_step(self):
+        self.assertEqual([12, 4, -4, -11], WaveformData.unwrap_codes([12, 4, 252, 245]))
+
+    def test_a_sequence_that_does_not_wrap_is_left_alone(self):
+        self.assertEqual([10, 30, 50, 70], WaveformData.unwrap_codes([10, 30, 50, 70]))
+
+    def test_pinning_works_before_the_header_has_a_scale(self):
+        # The first capture of a session can arrive with no volts/div in the header.
+        # Requiring one skipped the calibration entirely, so the panel drew the bench
+        # reference (a 2.6 V sine at 1.87 V) until a later capture carried it.
+        waveform = WaveformData()
+        header = hds_header("5v")
+        for entry in header.get("CHANNEL", []):
+            entry.pop("SCALE", None)
+        waveform.parse_hds_capture(header, {"CH1": hds_payload([57, 145, 233])})
+        self.assertEqual("reference (uncalibrated)", waveform.channels[0]["volts_per_code_source"])
+        self.assertTrue(waveform.calibrate_from_measurements(
+            {"Vmin": "-5.0", "Vmax": "5.0", "Vpp": "10.0"}, pin_extremes=True))
+        self.assertAlmostEqual(10.0, max(waveform.channels[0]["waveform_data"])
+                               - min(waveform.channels[0]["waveform_data"]), places=2)
+
+    def test_the_decoded_span_is_the_signal_not_the_wrap(self):
+        # 2 x 65 codes peak to peak. Without unwrapping the extremes are 65 and -65
+        # plus a 256-code wrap, and the span comes out at about 320 codes.
+        channel = self.decode(self.wrapped_sine(), volts_per_code=0.02)
+        volts = channel["waveform_data"]
+        self.assertAlmostEqual(2.60, max(volts) - min(volts), delta=0.06)
+
+    def test_nothing_in_the_trace_jumps_the_range(self):
+        # The symptom on screen: a full-scale break twice per period.
+        volts = self.decode(self.wrapped_sine(), volts_per_code=0.02)["waveform_data"]
+        steps = [abs(b - a) for a, b in zip(volts, volts[1:])]
+        self.assertLess(max(steps), 0.5)          # the largest real step is about 8 codes
+
+    def test_a_sample_at_the_ambiguity_limit_is_left_where_it_comes(self):
+        # Half the range or more cannot be resolved at this width: do not invent a branch.
+        self.assertEqual([0, 128], WaveformData.unwrap_codes([0, 128]))
 
 
 class FramingSettleTests(unittest.TestCase):

@@ -415,6 +415,16 @@ class LiveCaptureTests(PanelTestCase):
         self.scope.download_waveform_data.assert_called_once_with(
             reuse_header=True, calibrate=True)
 
+    def test_a_later_live_frame_rides_on_the_remembered_slope(self):
+        # The fast path: with a frame count that is not a multiple of the interval,
+        # a live frame reuses both the header and the slope already in hand, and the
+        # measurement block is not read again.
+        self.scope._calibrated_volts_per_code = 0.0195
+        self.app._live_frames = 3                 # not a multiple of the interval
+        self.capture_with(reuse_header=True)
+        self.scope.download_waveform_data.assert_called_once_with(
+            reuse_header=True, calibrate=False)
+
     def test_a_manual_capture_gets_a_fresh_header_and_a_calibration(self):
         self.capture_with()
         self.scope.download_waveform_data.assert_called_once_with(

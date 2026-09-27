@@ -394,9 +394,40 @@ class WaveformData:
         words = np.frombuffer(payload[:usable], dtype="<u2")
         return (words >> 8).astype(np.int32).tolist()
 
+    @staticmethod
+    def unwrap_codes(codes):
+        """Turn wrapped 8-bit screen codes into a continuous series.
+
+        The payload carries each sample as one byte, and the acquisition's own offset
+        can sit the signal across the 0/255 boundary. A 2.5 Vpp 1 kHz sine arrives as
+        ..., 12, 4, 252, 245, ... - a step of -8 codes, not -248. Read as raw codes
+        that is a signal jumping the full range twice per period: the trace is drawn
+        with a vertical break through the middle of every cycle, and the span the
+        calibration is fitted to is the 248-code wrap rather than the signal, so a
+        2.60 V input is drawn and measured as 3.52 V.
+
+        Adjacent samples of anything this instrument can put on screen move far less
+        than half the range - 50 samples to a 1 kHz cycle at 20 us a point is about
+        8 codes a step on a full-screen signal - so the smallest step is the right
+        branch. A step at or beyond half the range is genuinely ambiguous at this
+        width, and such a sample is left where it comes.
+        """
+        unwrapped, offset, previous = [], 0, None
+        for code in codes:
+            if previous is not None:
+                step = ((code - previous + 128) % 256) - 128
+                if abs(step) < 128:          # half the range or more is not a step to guess at
+                    offset += step - (code - previous)
+            previous = code
+            unwrapped.append(code + offset)
+        return unwrapped
+
     def _parse_hds_channel(self, header, channel_name, payload,
                            calibrated_volts_per_code=None):
-        codes = self._hds_codes(payload)
+        # Wrapped codes are made continuous before anything else reads them: the
+        # volts, the calibration's extremes and the plotted trace all depend on
+        # samples being in order, and a signal across the 0/255 boundary is not.
+        codes = self.unwrap_codes(self._hds_codes(payload))
         if not codes:
             return None
 
@@ -591,10 +622,15 @@ class WaveformData:
             if not codes:
                 continue
             lo, hi = min(codes), max(codes)
+            # The header's volts/div is only a starting point for the slope, and the
+            # first capture of a session can arrive before the header is complete. It
+            # must not block the pinning, which recomputes the slope from the anchors
+            # and needs neither: requiring it here silently skipped the calibration on
+            # that first capture, and the panel then drew on the bench reference - a
+            # 2.6 V sine at 1.87 V - until a later capture happened to carry it.
             volts_per_div = entry.get("volts_per_div")
-            if not volts_per_div:
-                continue
-            slope = entry.get("voltage_per_point") or (volts_per_div / HDS_CODES_PER_DIVISION)
+            slope = entry.get("voltage_per_point") or (
+                (volts_per_div / HDS_CODES_PER_DIVISION) if volts_per_div else None)
             mean_code = sum(codes) / len(codes)
             anchors = []
             method = "scale + zero from instrument average"
@@ -610,7 +646,7 @@ class WaveformData:
                 slope, offset, residual = fit
                 method = "extremes pinned to instrument MIN/MAX/PKPK"
             else:
-                if vmean is None:
+                if vmean is None or not slope:
                     continue
                 # volts(code) = (code - zero) * slope, with the mean landing on
                 # the instrument's average: zero = mean_code - Vmean / slope.
@@ -628,7 +664,7 @@ class WaveformData:
                 "method": method,
                 "volts_per_code": slope,
                 "offset_volts": offset,
-                "codes_per_division": volts_per_div / slope if slope else None,
+                "codes_per_division": (volts_per_div / slope) if (volts_per_div and slope) else None,
                 "anchors": anchors,
                 "residual_volts": residual,
                 "source": "instrument measurements",
