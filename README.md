@@ -55,9 +55,40 @@ This project provides a Python-based GUI for OWON HDS200/HDS300 and SDS series o
 - Pillow
 
 ## Usage
-1. Install dependencies: `pip install numpy matplotlib pyserial`
-2. Run `main.py` to launch the GUI: `python main.py`
-3. Connect to your oscilloscope and use the GUI to control, acquire, and save data.
+
+From this directory, in a shell (Git Bash shown; on Windows double-clicking
+`run-portable.cmd` does the same thing):
+
+```bash
+unset TCL_LIBRARY TK_LIBRARY
+./.venv/Scripts/python.exe main.py
+```
+
+The two variables are cleared because an installed CSR BlueSuite exports
+`TCL_LIBRARY` machine-wide, and Tk then refuses to start with "This probably means
+that Tcl wasn't installed properly". Removing them is required - setting them
+EMPTY is not the same thing and still fails. `run-portable.cmd` clears them for
+you, so a double-click works without a shell.
+
+If the project virtual environment does not exist yet:
+
+```bash
+python -m venv .venv
+./.venv/Scripts/python.exe -m pip install -r requirements.txt
+```
+
+Run the suite the same way, with the same two variables cleared:
+
+```bash
+unset TCL_LIBRARY TK_LIBRARY
+./.venv/Scripts/python.exe -m unittest discover -s tests -t .
+```
+
+Then connect to your oscilloscope and use the GUI to control, acquire, and save
+data. Only one process can hold the USB HID endpoint at a time, so closing the
+window before running a probe or a second copy is what makes the instrument
+answer; start a probe against a scope the app still has open and every reply comes
+back empty.
 
 ## File Structure
 - `main.py` - Main application and GUI
