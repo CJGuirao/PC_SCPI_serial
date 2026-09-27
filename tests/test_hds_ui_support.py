@@ -771,6 +771,34 @@ class VerticalFrameTests(PanelTestCase):
         self.assertAlmostEqual(centred[0], moved[0], places=9)
         self.assertAlmostEqual(centred[1], moved[1], places=9)
 
+    def test_the_position_control_moves_the_trace_and_not_the_grid(self):
+        # The panel's position control: a position knob moves the trace across a
+        # graticule that is fixed to the screen. Adding the shift to the window as
+        # well made the two cancel out, so the trace held still and the grid slid -
+        # and a reading taken against a sliding grid is worth nothing.
+        channel = self.channel(5.0)
+        self.scope.waveform_data.channels = [channel]
+        with patch.object(self.app, "sync_vertical_controls"):
+            self.app.plot_waveform()
+        low, high = self.app.ax.get_ylim()
+        ticks = list(self.app.ax.get_yticks())
+        trace = list(self.app.ax.lines[0].get_ydata())        # the plotted trace
+
+        self.app._display_offset[1] = 5.0                      # one row of 5 V/div
+        with patch.object(self.app, "sync_vertical_controls"):
+            self.app.plot_waveform()
+
+        frame = self.app.ax.get_ylim()
+        self.assertAlmostEqual(low, frame[0], places=9)
+        self.assertAlmostEqual(high, frame[1], places=9)
+        self.assertEqual(ticks, list(self.app.ax.get_yticks()))
+        moved = list(self.app.ax.lines[0].get_ydata())
+        self.assertAlmostEqual(5.0, moved[0] - trace[0], places=9)
+        self.assertAlmostEqual(5.0, moved[1] - trace[1], places=9)
+        # And the capture itself is untouched: the position is a view setting,
+        # so no measurement or export can come back different for it.
+        self.assertEqual([0.0, 1.0, -1.0], list(channel["waveform_data"]))
+
     def test_a_finer_volts_div_draws_a_taller_trace(self):
         # The whole point of framing on the instrument's screen: a row is the
         # selected volts/div, so the same volts must fill more rows at a finer

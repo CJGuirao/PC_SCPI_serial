@@ -349,8 +349,9 @@ class App(ModernLabUI):
                      "is." % (channel, offset), "WARNING")
             return
         self._display_offset[channel] = value
-        self.log("CH%d position: %+.3g V in this view. The instrument's own vertical "
-                 "position is set on its front panel." % (channel, value))
+        self.log("CH%d position: the trace moved %+.3g V; the grid did not. The "
+                 "instrument's own vertical position is set on its front panel."
+                 % (channel, value))
         self.plot_waveform()
 
     def set_timebase(self):
@@ -1224,6 +1225,10 @@ class App(ModernLabUI):
         only the height of the trace and the value of a row do, and rows x volts-per-row
         comes back to the same signal either way.
 
+        The frame does not follow the panel's position control: that control moves
+        the trace across this frame, the way a position knob moves a trace across a
+        graticule that is fixed to the screen.
+
         Returns {"low", "high", "step", "label"} or None when the capture carries
         no usable scale (raw codes, or a failed scale query), in which case the
         caller falls back to autoscaling.
@@ -1236,10 +1241,13 @@ class App(ModernLabUI):
             if not volts_per_div or not samples or channel.get("units") != "V":
                 continue
             half = (HDS_VERTICAL_DIVISIONS / 2.0) * volts_per_div
-            # A trace the user has moved must still be on screen: the frame covers
-            # the whole grid plus wherever the position control has put the trace.
-            offset = self.display_offset(number)
-            spans.append((-half + offset, half + offset))
+            # The frame is the instrument's screen, so the position control does
+            # NOT move it: the trace moves across a grid that stays where it is,
+            # which is what makes a row on screen mean the volts/div it reads.
+            # Adding the offset here moved the window with the trace, so the two
+            # cancelled and the grid slid while the trace held still - a visual
+            # reading taken against a sliding grid is worth nothing.
+            spans.append((-half, half))
             note = ""
             claim = channel.get("volts_per_div")
             decoded = channel.get("true_volts_per_div")
