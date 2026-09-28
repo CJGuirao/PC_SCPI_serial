@@ -293,5 +293,29 @@ class PerModelTests(unittest.TestCase):
         self.assertIn("model=HDS271", setup.as_text())
 
 
+class SettingsLocationTests(unittest.TestCase):
+    """The settings file belongs to the installation, not to a module.
+
+    Deriving its path from this module's own __file__ put it inside the package the
+    moment the code was split into one, and the app then ran on defaults while a
+    perfectly good scope_setup.json sat beside main.py - the bench calibration with it.
+    Measured in the log: "no ...\\modernlab\\settings\\scope_setup.json yet; using
+    defaults".
+    """
+
+    def test_the_installed_path_is_beside_the_app(self):
+        # INSTALLED_PATH, not DEFAULT_PATH: the suite redirects the latter into a temp
+        # directory, which is exactly why the regression below went unnoticed.
+        from modernlab import PROJECT_ROOT
+        from modernlab.settings.bench import INSTALLED_PATH
+        self.assertTrue(os.path.exists(os.path.join(PROJECT_ROOT, "main.py")),
+                        "the project root is where the entry point is")
+        self.assertEqual(os.path.join(PROJECT_ROOT, "scope_setup.json"), INSTALLED_PATH)
+
+    def test_the_installed_path_is_not_inside_the_package(self):
+        from modernlab.settings.bench import INSTALLED_PATH
+        self.assertNotIn(os.sep + "modernlab", INSTALLED_PATH)
+
+
 if __name__ == "__main__":
     unittest.main()

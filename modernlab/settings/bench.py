@@ -13,11 +13,16 @@ import json
 import logging
 import os
 
-from modernlab import analysis
+from modernlab import PROJECT_ROOT, analysis
 
 #: Where the settings live when no path is given. Beside the app, so it is easy to
-#: find, edit, and copy to another machine.
-DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scope_setup.json")
+#: find, edit, and copy to another machine. Resolved from the project root, never from
+#: this module's own location: that put the file inside the package as soon as the code
+#: was split into one, and the app then ran on defaults with a good file beside main.py.
+INSTALLED_PATH = os.path.join(PROJECT_ROOT, "scope_setup.json")
+
+#: What callers and tests are free to redirect.
+DEFAULT_PATH = INSTALLED_PATH
 
 #: Bumped when the meaning of a stored key changes, so an old file is understood
 #: rather than silently misread.
