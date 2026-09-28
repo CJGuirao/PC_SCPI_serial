@@ -4,6 +4,9 @@ This project provides a Python-based GUI for OWON HDS200/HDS300 and SDS series o
 
 ![OWON HDS Oscilloscope Control GUI](doc/screen.jpg)
 
+Verified against an **HDS271, firmware V1.3.0**, over USB HID. The LAN path and the
+SDS dialect come from an **SDS6202** and are not re-verified here.
+
 ## Features
 
 **Acquisition and control**
@@ -14,6 +17,9 @@ This project provides a Python-based GUI for OWON HDS200/HDS300 and SDS series o
   more than one is attached
 - Query and display measurements (frequency, voltage, timing, etc.)
 - Auto-refresh and continuous monitoring, at an interval you choose
+- **A transport control and one state read-out**: LIVE with its redraw rate, SINGLE
+  while a capture is in flight, OFFLINE when nothing is attached, and FILE when a
+  saved capture is open
 - Channel controls: display, scale, coupling, probe, vertical offset
 - Timebase, trigger, acquisition, and memory depth controls
 - A **SCPI console**, read-only until you allow writes, for talking to the
@@ -23,6 +29,9 @@ This project provides a Python-based GUI for OWON HDS200/HDS300 and SDS series o
 - A **multimeter mode picker**, limited to the functions the instrument answers
 - **Software autoset**: frames the time axis from the measured frequency, using the
   one framing write this interface can actually make
+- Every instrument call runs on **one owner worker thread** (`scope_io.py`). The
+  window never blocks on a query, one call is in flight at a time, a capture jumps
+  ahead of a refresh, and repeated requests for the same thing coalesce
 
 **Reading the capture**
 - Four views of the same samples: **time, FFT, maths, XY**
@@ -34,13 +43,16 @@ This project provides a Python-based GUI for OWON HDS200/HDS300 and SDS series o
 - **Maths traces**: CH1±CH2, CH1×CH2, either channel inverted
 - **Measurement cursors**: two time markers giving ΔT, 1/ΔT and each trace's level
   at both, and two voltage markers giving ΔV. Drag them, or click to place them
+- A per-channel **0 V marker**, labelled with its offset in volts and in divisions,
+  drawn in the channel's colour. It lands in exported figures too
 - A **data table** view of the samples
 
 **Keeping it**
 - Save as CSV, JSON, Excel (`.xlsx`), PNG or PDF — every format carrying the
   settings that make its numbers checkable
 - Open a saved capture and read it offline, in any of the views
-- **Unattended recording**: one CSV per frame into a folder you choose
+- **Unattended recording**: one CSV per frame into a folder you choose, with a
+  player to step back through what was recorded
 - A **SETUP** screen that saves which scope to talk to, the calibration, the
   monitoring interval, the plot palette and the FFT defaults
 - Plot palettes: Dark, Light, and a Print palette for exported figures
@@ -72,7 +84,12 @@ unset TCL_LIBRARY TK_LIBRARY
 ./.venv/Scripts/python.exe main.py
 ```
 
-Double-clicking `run-portable.cmd` does the same thing without a shell.
+Double-clicking `run.bat` does the same thing without a shell: it clears the two
+variables below, uses the virtual environment, and passes any arguments through to
+`main.py`. `run-portable.cmd` is the self-contained variant - it redirects
+`TEMP`/`APPDATA`/`MPLCONFIGDIR` into a `.portable` directory beside the app and writes
+its output to `.portable/logs/application.log` instead of using your profile and the
+console.
 
 **`set TCL_LIBRARY=` must be its own line in cmd.** Chaining it as
 `set TCL_LIBRARY= && ...` leaves the variable set to a single SPACE, which fails
@@ -92,7 +109,10 @@ python -m venv .venv
 ./.venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
-Run the suite the same way, with the same two variables cleared:
+## Tests
+
+362 tests, with no instrument attached (the suite mocks the transport). Clear the same
+two variables, or tkinter will not start and the GUI tests fail while the rest pass:
 
 ```bash
 unset TCL_LIBRARY TK_LIBRARY
@@ -108,6 +128,8 @@ back empty.
 ## File Structure
 - `main.py` - Main application and GUI
 - `modern_lab.py` - The front panel itself: plot, drawers, dialogs
+- `scope_io.py` - The single owner of the instrument: one worker thread, ordered and
+  coalesced calls, captures ahead of refreshes
 - `owon_controller.py` - SCPI and binary protocol controller
 - `waveform_data.py` - Waveform data parser and vertical calibration
 - `hds_usb.py` - USB HID transport and device enumeration
@@ -117,10 +139,14 @@ back empty.
 - `calibrate_manual.py` - Derives the calibration trim from a live capture
 - `scope_gui.py` - Additional GUI components
 - `console.py` - SCPI console to talk with the scope
+- `run.bat` - Launcher for a plain `cmd` prompt
+- `run-portable.cmd` / `portable_launcher.py` - Self-contained launcher
 - `tests/` - The test suite (`python -m unittest discover -s tests -t .`)
 
 ## Notes
-- I have tested it on a SDS6202 oscilloscope through LAN. To be able to ping it I had to change the default MAC address. **I have not tested it with newer Owon scopes!**.
+- I have tested it on a SDS6202 oscilloscope through LAN. To be able to ping it I had to
+  change the default MAC address. The USB path is verified on an HDS271; other models in
+  both families have not been tried.
 - **The SCPI implementation in Owon is buggy**, with little or outdated documentation. The connection often times out and then I have to reconnect.
 - LLM have been used to help build this app. Mostly Deepseek and Copilot.
 
@@ -154,13 +180,44 @@ Learned on hardware, all of it expensive:
 * The instrument's own Utility -> F4 -> USB menu setting does not change the USB descriptors;
   it reports `Oscilloscope MSC+HID` regardless of the selected mode.
 
-### Waveform download is not supported on firmware V1.3.0
+### Downloading the screen capture
 
-`:DATa:WAVe:SCReen:HEAD?` declares a 475-byte JSON header and `:DATa:WAVe:SCReen:CH1?` declares
-600 bytes (300 points x 2 bytes, little-endian, per the SCPI manual), but the instrument returns
-exactly one 64-byte report and then NAKs. Ruled out by experiment: reads larger than 64 bytes
-time out with no data at all; repeating a query restarts it instead of continuing; HID GET_REPORT
-stalls for every report type; SET_REPORT is accepted but inert; the legacy
-START/STARTBIN/STARTBMP/STARTMEMDEPTH upload protocol is silent; the mass-storage volume carries
-no filesystem; and paced 64-byte reads, empty OUT reports and report-ID tokens all yield nothing.
-Control, status and measurement traffic is unaffected and verified.
+`:DATa:WAVe:SCReen:HEAD?` returns a JSON header and `:DATa:WAVe:SCReen:CH1?` a 300-point
+payload, paced in exactly-64-byte reports at about a 32 ms interval. The firmware abandons a
+payload that is not polled within roughly 100 ms, which is why a missed header is retried
+rather than treated as a failure. The legacy START/STARTBIN/STARTBMP upload protocol is
+silent and the mass-storage volume carries no filesystem, but the screen capture path works
+on this firmware, and it is what the application draws from.
+
+Four properties of these samples cost real time to learn, and each one produces a plausible
+but wrong picture if assumed away:
+
+* **Each sample is one byte, and it WRAPS.** The acquisition's offset can sit a signal across
+  the 0/255 boundary, so the stream is only continuous modulo 256: a 2.5 Vpp sine arrived as
+  `..., 12, 4, 252, 245, ...`, a step of -8 codes rather than -248. Read as absolute values
+  that is a signal jumping full scale twice per period - drawn as a vertical stroke through
+  the middle of every cycle - and it inflates the span fed to the calibration, which is how a
+  2.600 V input came to be drawn and measured as 3.524 V. The codes are walked into a
+  continuous series before anything else reads them. A step of half the range or more is left
+  as it comes: the branch cannot be resolved at this width, and guessing one would invent a
+  waveform.
+* **The vertical scale comes from the instrument's own readings, never from the volts/div
+  label.** The label is a display string that this firmware does not keep in step with the
+  gain. Each capture is calibrated by pinning the decoded extremes onto the instrument's
+  MIN/MAX/PKPK - a 2.5 Vpp sine decodes to 2.600 V, which is what the instrument itself
+  reports - and the slope is remembered so later captures need no extra round trips.
+* **Volts/div and vertical position cannot be written over USB.** Both are accepted and
+  ignored, and both corrupt the instrument's own readout. The panel therefore never writes
+  them, and its volts/div control moves only what it draws. The timebase write *is* live.
+* **The frame is part of the measurement.** It is centred on the capture's own extent rather
+  than on 0 V, because the decode puts the code midpoint at the middle of the screen, which is
+  only 0 V for a signal that straddles zero: a unipolar 0-25 V sawtooth in a 0 V-centred frame
+  has its peaks chopped at the top edge, and the flyback then re-enters from that edge as a
+  stroke standing over the ramp. Auto likewise takes the finest display setting at least as
+  coarse as the decode (3.19 V/div must land on 5, not 2), and a trace that still does not fit
+  is reported together with the setting that would frame it.
+
+`HDS_MANUAL_CALIBRATION_TRIM` in `waveform_data.py` is a bench trim for the case where the
+generator is the reference and the instrument is the thing that is off. It is not a fudge
+factor for the decode: the calibration above recomputes the slope from the instrument's
+readings, so a trim applied downstream of it would cancel itself out.
