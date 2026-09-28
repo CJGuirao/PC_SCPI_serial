@@ -954,14 +954,17 @@ class ModernLabUI:
     def live_gap_ms(self):
         """How long to leave between live frames, from the bench settings.
 
-        A capture costs about half a second, so this is a wait rather than a rate:
-        the interval the app actually achieves is measured and shown either way.
+        Default is 0: start the next capture the moment the previous one lands.
+        The instrument is the floor (~450 ms over USB HID), so the displayed rate
+        is the honest figure rather than whatever the interval was set to.
+        A non-zero value slows things down intentionally (e.g. to reduce CPU load
+        while recording to disk).
         """
         try:
-            seconds = float(getattr(self.setup, "values", {}).get("live_interval_s") or 0.5)
+            seconds = float(getattr(self.setup, "values", {}).get("live_interval_s") or 0.0)
         except (TypeError, ValueError):
-            seconds = 0.5
-        return max(50, int(seconds * 1000))
+            seconds = 0.0
+        return max(0, int(seconds * 1000))
 
     def watch_framing(self):
         """Ask for the framing signature; the answer lands in on_instrument_result.
@@ -1130,11 +1133,24 @@ class ModernLabUI:
     def refresh_marker_lines(self):
         """Draw the placed markers, and report what they measure.
 
-        The artists are rebuilt whenever the axes are cleared, which is why this is
-        called at the end of every plot rather than once at start-up.
+        The artists are rebuilt on every call. On a full clear+redraw the old
+        artists are gone already; on the fast path (no ax.clear) they are removed
+        explicitly here before the new ones are added.
         """
+        # Remove artists from the previous call so fast-path frames do not stack.
+        for artist in getattr(self, "_cursor_artists", {}).values():
+            try:
+                artist.remove()
+            except Exception:
+                pass
+        for artist in getattr(self, "_cursor_annots", []):
+            try:
+                artist.remove()
+            except Exception:
+                pass
         colours = {"t1": "#9cdc9c", "t2": "#9cdc9c", "v1": "#ffb86b", "v2": "#ffb86b"}
         self._cursor_artists = {}
+        self._cursor_annots = []
         for which, value in (self._cursors or {}).items():
             if value is None:
                 continue
@@ -1142,17 +1158,18 @@ class ModernLabUI:
                 artist = self.ax.axvline(value, color=colours[which], linewidth=1.1,
                                          linestyle="--", alpha=0.95)
                 label = "%s %s" % (which.upper(), analysis.format_seconds(value))
-                self.ax.annotate(label, xy=(value, 1.0), xycoords=("data", "axes fraction"),
+                annot = self.ax.annotate(label, xy=(value, 1.0), xycoords=("data", "axes fraction"),
                                  xytext=(3, -10), textcoords="offset points",
                                  color=colours[which], fontsize=8, fontweight="bold")
             else:
                 artist = self.ax.axhline(value, color=colours[which], linewidth=1.1,
                                          linestyle="--", alpha=0.95)
                 label = "%s %s" % (which.upper(), analysis.format_volts(value))
-                self.ax.annotate(label, xy=(0.0, value), xycoords=("axes fraction", "data"),
+                annot = self.ax.annotate(label, xy=(0.0, value), xycoords=("axes fraction", "data"),
                                  xytext=(4, 0), textcoords="offset points",
                                  color=colours[which], fontsize=8, fontweight="bold")
             self._cursor_artists[which] = artist
+            self._cursor_annots.append(annot)
         self.canvas.draw_idle()
 
     def on_cursors_moved(self):
@@ -1832,7 +1849,7 @@ class SetupDialog(tk.Toplevel):
         row += 1
 
         self.live_interval = tk.StringVar(
-            value=self._format(self.setup.values.get("live_interval_s"), blank="0.5"))
+            value=self._format(self.setup.values.get("live_interval_s"), blank="0"))
         self.palette_choice = tk.StringVar(value=self.setup.values.get("palette") or "Dark")
         self.fft_window_choice = tk.StringVar(value=self.setup.values.get("fft_window") or "hanning")
         self.fft_format_choice = tk.StringVar(value=self.setup.values.get("fft_format") or "dBV")

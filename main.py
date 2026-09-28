@@ -2190,11 +2190,7 @@ class App(ModernLabUI):
 
     def plot_time(self):
         channels = self.capture_channels()
-        self.ax.clear()
         face = self.palette()
-        self.ax.set_facecolor(face["face"])
-        self.ax.grid(True, alpha=0.25, color=face["grid"], linestyle=":")
-        self.ax.set_ylabel("Voltage (V)", color=face["text"], fontsize=9)
 
         palette = {
             "CH1": face["trace1"],
@@ -2212,7 +2208,6 @@ class App(ModernLabUI):
                 factor, unit = self.time_axis_units(interval * (len(samples) - 1))
                 span = interval * (len(samples) - 1) * factor
                 break
-        self.ax.set_xlabel(f"Time ({unit})")
 
         plotted = False
         # The extent of what actually gets drawn, offsets included, so a trace pushed
@@ -2221,6 +2216,7 @@ class App(ModernLabUI):
         # (name, colour, where this trace's zero sits, volts per row of the grid),
         # for the 0 V markers drawn with the graticule below.
         references = []
+        per_channel_xy = []
         for channel in channels:
             name = str(channel.get("name", "CH1")).upper()
             color = palette.get(name, "#9cdc9c")
@@ -2238,7 +2234,7 @@ class App(ModernLabUI):
                 # drawn in, so the trace moves and the grid does not.
                 y = y + self.display_offset(number)
             x = np.arange(y.size, dtype=float) * float(channel.get("point_interval", 1.0) or 1.0) * factor
-            self.ax.plot(x, y, color=color, linewidth=1.4)
+            per_channel_xy.append((name, color, x, y))
             plotted = True
             drawn_low = float(np.min(y)) if drawn_low is None else min(drawn_low, float(np.min(y)))
             drawn_high = float(np.max(y)) if drawn_high is None else max(drawn_high, float(np.max(y)))
@@ -2269,11 +2265,67 @@ class App(ModernLabUI):
                     self.status_var.set(note)
                     self.log(note)
 
-        if not plotted:
-            self.ax.text(0.5, 0.5, "No waveform data", transform=self.ax.transAxes,
-                         ha="center", va="center", color="#94a5a5")
+        # --- Fast path: graticule unchanged → only swap the dynamic artists ---
+        # The "frame key" captures everything the static frame depends on. When it
+        # matches the previous frame we skip ax.clear() and the full graticule
+        # redraw, which is the dominant drawing cost at ~1.5 fps.
+        channel_names = tuple(name for name, *_ in per_channel_xy)
+        # Include display offsets: a position change shifts the trace data,
+        # so the fast path must re-draw the lines even though the graticule is
+        # the same. Offsets are keyed by channel number from _display_offset.
+        display_offsets = tuple(
+            (name, round(self.display_offset(self.channel_number(ch)) or 0.0, 12))
+            for name, ch in zip(channel_names,
+                                [c for c in channels if c.get("waveform")])
+        )
+        frame_key = (
+            framing.get("low") if framing else None,
+            framing.get("high") if framing else None,
+            framing.get("label") if framing else None,
+            window,
+            unit,
+            channel_names,
+            display_offsets,
+            face.get("name", ""),
+        )
+        fast_path = (
+            plotted
+            and framing is not None
+            and getattr(self, "_plot_frame_key", None) == frame_key
+        )
+
+        if fast_path:
+            # Remove only the dynamic artists added last frame: traces, trigger
+            # cursor, zero markers, cursor markers (refresh_marker_lines adds more).
+            for artist in getattr(self, "_dynamic_artists", []):
+                try:
+                    artist.remove()
+                except Exception:
+                    pass
+            self._dynamic_artists = []
+            # Re-draw the traces onto the existing axes.
+            for _name, color, x, y in per_channel_xy:
+                line, = self.ax.plot(x, y, color=color, linewidth=1.4)
+                self._dynamic_artists.append(line)
         else:
-            self.show_graticule(framing, window, unit, factor)
+            # Slow path: full clear + graticule redraw.
+            self.ax.clear()
+            self.ax.set_facecolor(face["face"])
+            self.ax.grid(True, alpha=0.25, color=face["grid"], linestyle=":")
+            self.ax.set_ylabel("Voltage (V)", color=face["text"], fontsize=9)
+            self.ax.set_xlabel(f"Time ({unit})")
+            self._dynamic_artists = []
+
+            if not plotted:
+                self.ax.text(0.5, 0.5, "No waveform data", transform=self.ax.transAxes,
+                             ha="center", va="center", color="#94a5a5")
+            else:
+                for _name, color, x, y in per_channel_xy:
+                    line, = self.ax.plot(x, y, color=color, linewidth=1.4)
+                    self._dynamic_artists.append(line)
+                self.show_graticule(framing, window, unit, factor)
+            self._plot_frame_key = frame_key
+
         self.draw_reference_lines(plotted)
         self.draw_zero_markers(references if plotted else [])
         self.canvas.draw_idle()
@@ -2371,6 +2423,16 @@ class App(ModernLabUI):
         observed to shift with it, and a line across the trace would imply a
         sample alignment that is not there.
         """
+        # Remove artists from the previous call so fast-path frames do not
+        # accumulate them.  ax.clear() already removes them on the slow path;
+        # the try/except handles that case silently.
+        for artist in getattr(self, "_ref_line_artists", []):
+            try:
+                artist.remove()
+            except Exception:
+                pass
+        self._ref_line_artists = []
+
         if not plotted:
             return
         level = getattr(self, "_trigger_level_v", None)
@@ -2381,12 +2443,13 @@ class App(ModernLabUI):
             if level < low or level > high:
                 span = (high - low) or 1.0
                 self.ax.set_ylim(min(low, level - 0.05 * span), max(high, level + 0.05 * span))
-            self.ax.axhline(level, color="#ff7b72", linestyle="--", linewidth=1.0, alpha=0.85)
-            self.ax.annotate("TRIG %g V" % level, xy=(0.0, level),
+            line = self.ax.axhline(level, color="#ff7b72", linestyle="--", linewidth=1.0, alpha=0.85)
+            annot = self.ax.annotate("TRIG %g V" % level, xy=(0.0, level),
                              xycoords=("axes fraction", "data"),
                              xytext=(4, 0), textcoords="offset points",
                              color="#ff7b72", fontsize=8, va="center", ha="left",
                              fontweight="bold")
+            self._ref_line_artists.extend([line, annot])
         position = getattr(self, "_horizontal_position", None)
         if isinstance(position, (int, float)) and position:
             self.ax.set_title("HPOS %s" % self.timebase_position_text(position),
@@ -2408,20 +2471,29 @@ class App(ModernLabUI):
         here touches the frame - the marker moves, the grid does not.
         """
         self._zero_marks = []
+        # Remove artists from the previous call (fast path keeps old artists on
+        # the axes; slow path already cleared them, so remove() silently fails).
+        for artist in getattr(self, "_zero_mark_artists", []):
+            try:
+                artist.remove()
+            except Exception:
+                pass
+        self._zero_mark_artists = []
         for name, colour, offset, volts_per_div in references:
             moved = abs(offset) > 1e-12
-            self.ax.axhline(offset, color=colour, linewidth=0.9, alpha=0.7, zorder=1.6,
+            line = self.ax.axhline(offset, color=colour, linewidth=0.9, alpha=0.7, zorder=1.6,
                             linestyle=(0, (1.0, 1.6)) if moved else (0, (1.0, 3.4)))
             label = "%s 0V" % name
             if moved:
                 label += "  %+.3g V" % offset
                 if volts_per_div:
                     label += "  (%+.2f div)" % (offset / volts_per_div)
-            self.ax.annotate(label, xy=(1.0, offset),
+            annot = self.ax.annotate(label, xy=(1.0, offset),
                              xycoords=("axes fraction", "data"),
                              xytext=(-5, 0), textcoords="offset points",
                              color=colour, fontsize=8, va="center", ha="right",
                              annotation_clip=False)
+            self._zero_mark_artists.extend([line, annot])
             self._zero_marks.append({"name": name, "offset": offset, "label": label})
 
     def save_waveform(self):
