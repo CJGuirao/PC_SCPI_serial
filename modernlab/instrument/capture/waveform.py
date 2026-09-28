@@ -283,7 +283,7 @@ class WaveformData:
                 "frequency": 0,
                 "cycle": 0,
                 "voltage_per_point": 0.0,
-                "waveform_data": [],
+                "waveform": [],
             }
 
             if pos + 44 <= len(data):
@@ -307,7 +307,7 @@ class WaveformData:
                         data_pos = data_start + (i * point_width)
                         value = struct.unpack("<b", data[data_pos:data_pos + point_width])[0]
                         waveform.append(value)
-                    channel["waveform_data"] = waveform
+                    channel["waveform"] = waveform
                     logging.info("Channel %s: %s points parsed", channel_name, len(waveform))
                 return channel
         except Exception as exc:
@@ -329,7 +329,7 @@ class WaveformData:
         with the gain, so decoding from it puts the signal out by that ratio.
 
         Each channel dict keeps the keys the GUI already plots with
-        ("waveform_data" in volts, "point_interval" in seconds per point) and
+        ("waveform" in volts, "point_interval" in seconds per point) and
         adds the raw 8-bit codes for callers that want them.
         """
         self.raw_data = b""
@@ -522,7 +522,7 @@ class WaveformData:
             # selected volts/div is divided into the 32 codes a division holds.
             "voltage_per_point": volts_per_code,
             # The GUI plots these two directly.
-            "waveform_data": volts,
+            "waveform": volts,
             "raw_codes": codes,
             "units": "V",
             # What the instrument CLAIMS its vertical scale is. Cosmetic on this
@@ -656,7 +656,7 @@ class WaveformData:
                 anchors = [(mean_code, vmean)]
 
             volts = [round(slope * code + offset, 6) for code in codes]
-            entry["waveform_data"] = volts
+            entry["waveform"] = volts
             entry["voltage_per_point"] = slope
             entry["zero_point"] = (-offset / slope) if slope else entry.get("zero_point")
             entry["units"] = "V"

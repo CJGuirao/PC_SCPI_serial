@@ -1,11 +1,11 @@
 """Work out the trim for HDS_MANUAL_CALIBRATION_TRIM from a live capture.
 
-    .venv\\Scripts\\python.exe calibrate_manual.py 25.0
+    .venv\\Scripts\\python.exe tools\\calibrate_manual.py 25.0
 
 Put a signal on the input whose amplitude you trust, give this that amplitude in
 volts peak-to-peak, and it captures through the same path the panel uses, reads
 the amplitude and the volts per code the app used, and prints the line to paste
-into waveform_data.py along with what the grid will then show.
+into waveform.py along with what the grid will then show.
 
 Why a hand number at all: the automatic calibration pins the scale to the
 instrument's own reading, so the app agrees with the instrument. If the generator
@@ -19,13 +19,17 @@ import os
 import re
 import sys
 
+# Run from the repository root: a script's own directory goes on the path first, so the
+# repo root has to be added before `modernlab` can be imported.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 REPO = os.path.dirname(os.path.abspath(__file__))
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
 from owon_controller import OWONScopeController                  # noqa: E402
-from scope_setup import ScopeSetup                              # noqa: E402
-from waveform_data import HDS_MANUAL_CALIBRATION_TRIM            # noqa: E402
+from modernlab.settings.bench import ScopeSetup                              # noqa: E402
+from modernlab.instrument.capture.waveform import HDS_MANUAL_CALIBRATION_TRIM            # noqa: E402
 
 
 def main(argv):
@@ -45,8 +49,8 @@ def main(argv):
             print("capture failed")
             return 1
 
-        entry = (scope.waveform_data.channels or [{}])[0]
-        volts = entry.get("waveform_data") or []
+        entry = (scope.waveform.channels or [{}])[0]
+        volts = entry.get("waveform") or []
         per_code = entry.get("voltage_per_point") or 0.0
         if not volts or not per_code:
             print("the capture carried no volts: %r" % (entry.get("volts_per_code_source"),))

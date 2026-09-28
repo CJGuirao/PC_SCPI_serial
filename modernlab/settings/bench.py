@@ -13,7 +13,7 @@ import json
 import logging
 import os
 
-import analysis
+from modernlab import analysis
 
 #: Where the settings live when no path is given. Beside the app, so it is easy to
 #: find, edit, and copy to another machine.
@@ -35,7 +35,7 @@ def attached_scopes():
     missing on a machine that only ever uses the LAN transport.
     """
     try:
-        from hds_usb import list_owon_devices
+        from modernlab.instrument.transport.usb_hid import list_owon_devices
         return list_owon_devices()
     except Exception as exc:                                  # pragma: no cover - env
         logging.info("could not list USB scopes: %s", exc)
@@ -328,7 +328,7 @@ class ScopeSetup:
     def apply(self, waveform=None):
         """Push the settings into the decode. Returns what changed, for the log."""
         if waveform is None:
-            import waveform_data as waveform
+            from modernlab.instrument.capture import waveform
         changed = []
         waveform.HDS_MANUAL_CALIBRATION_TRIM = self.calibration_trim
         changed.append("calibration %s" % ("untrimmed" if self.calibration_trim is None

@@ -13,7 +13,7 @@ import tempfile
 import unittest
 import zipfile
 
-import waveform_export as export
+from modernlab.storage import export
 
 SETTINGS = {"model": "HDS271", "serial": "25520161", "firmware": "V1.3.0",
             "timebase_scale_s": 5e-4, "sample_rate": 50000.0, "point_interval_s": 2e-05,
@@ -22,9 +22,9 @@ SETTINGS = {"model": "HDS271", "serial": "25520161", "firmware": "V1.3.0",
 
 def channels():
     return [{"name": "CH1", "point_interval": 2e-05, "volts_per_div": 5.0, "probe": "X1",
-             "coupling": "DC", "waveform_data": [0.0, 12.5, -12.5, 6.0]},
+             "coupling": "DC", "waveform": [0.0, 12.5, -12.5, 6.0]},
             {"name": "CH2", "point_interval": 2e-05, "volts_per_div": 5.0, "probe": "X1",
-             "coupling": "DC", "waveform_data": [1.0, 1.0, 1.0, 1.0]}]
+             "coupling": "DC", "waveform": [1.0, 1.0, 1.0, 1.0]}]
 
 
 class TempMixin(unittest.TestCase):
@@ -64,7 +64,7 @@ class JsonTests(TempMixin):
         self.assertEqual(payload["settings"]["model"], "HDS271")
         self.assertEqual(payload["settings"]["calibration_trim"], 0.968992)
         self.assertEqual(len(payload["channels"]), 2)
-        self.assertEqual(payload["channels"][0]["waveform_data"][1], 12.5)
+        self.assertEqual(payload["channels"][0]["waveform"][1], 12.5)
 
 
 class XlsxTests(TempMixin):
@@ -112,7 +112,7 @@ class XlsxTests(TempMixin):
         self.assertEqual(export.sheet_name("Data", used), "Data (3)")
 
     def test_text_is_escaped_so_the_xml_survives(self):
-        channel = [{"name": "CH1", "point_interval": 1e-3, "waveform_data": [1.0]}]
+        channel = [{"name": "CH1", "point_interval": 1e-3, "waveform": [1.0]}]
         path = export.write_xlsx(self.path("escape.xlsx"), channel,
                                  {"note": 'R<1 & "R>2"'})
         rows = export.read_xlsx_sheets(path)["Settings"]

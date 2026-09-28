@@ -10,7 +10,7 @@ import threading
 import time
 import unittest
 
-from scope_io import PRIORITY_CAPTURE, PRIORITY_REFRESH, ScopeIO
+from modernlab.app.io_worker import PRIORITY_CAPTURE, PRIORITY_REFRESH, ScopeIO
 
 
 class FakeScope:

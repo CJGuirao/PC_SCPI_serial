@@ -126,19 +126,27 @@ answer; start a probe against a scope the app still has open and every reply com
 back empty.
 
 ## File Structure
-- `main.py` - Main application and GUI
-- `modern_lab.py` - The front panel itself: plot, drawers, dialogs
-- `scope_io.py` - The single owner of the instrument: one worker thread, ordered and
-  coalesced calls, captures ahead of refreshes
-- `owon_controller.py` - SCPI and binary protocol controller
-- `waveform_data.py` - Waveform data parser and vertical calibration
-- `hds_usb.py` - USB HID transport and device enumeration
-- `analysis.py` - Spectrum, maths, cursors, time axis (no UI, no instrument)
-- `waveform_export.py` - CSV/JSON/XLSX/PNG/PDF export, and reading captures back
-- `scope_setup.py` - Bench settings: which scope, and the calibration
-- `calibrate_manual.py` - Derives the calibration trim from a live capture
-- `scope_gui.py` - Additional GUI components
-- `console.py` - SCPI console to talk with the scope
+
+The code is split by domain. `doc/ARCHITECTURE.md` explains the rule between the
+layers and what is still to be split; briefly:
+
+```
+main.py                    entry point: starts the window
+modern_lab.py              the front panel: layout, widgets, dialogs
+owon_controller.py         SCPI controller (transport, dialect, framing, measurements)
+modernlab/                 everything that is not the UI
+  instrument/transport/    bytes over a link: usb_hid.py
+  instrument/capture/      payload to volts: waveform.py, decode and calibration
+  analysis/                spectrum, maths, cursors, time axis
+  storage/                 CSV, JSON, XLSX, PNG, PDF, and reading captures back
+  settings/                the bench: which scope, the calibration for it
+  app/                     io_worker.py, the single owner of the instrument
+tools/                     live diagnostics and the manual calibration helper
+archive/                   superseded scripts, kept for reference
+```
+
+Nothing under `modernlab/` imports the UI or `tkinter`, which is what lets the suite
+run headless.
 - `run.bat` - Launcher for a plain `cmd` prompt
 - `run-portable.cmd` / `portable_launcher.py` - Self-contained launcher
 - `tests/` - The test suite (`python -m unittest discover -s tests -t .`)

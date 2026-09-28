@@ -51,7 +51,7 @@ _SCALE_UNITS = "svaw\u03a9" + "\u00b5"
 
 def samples(channel):
     """The channel's volts as a float array."""
-    return np.asarray(channel.get("waveform_data") or [], dtype=float)
+    return np.asarray(channel.get("waveform") or [], dtype=float)
 
 
 def point_interval(channel):

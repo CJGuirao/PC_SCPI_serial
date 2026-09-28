@@ -14,18 +14,18 @@ which still win over this.
 import os
 import tempfile
 
-import scope_setup
-import waveform_data
+from modernlab.settings import bench
+from modernlab.instrument.capture import waveform
 
 #: No hand-set trim. The numbers the decode tests assert are the instrument's.
-waveform_data.HDS_MANUAL_CALIBRATION_TRIM = None
+waveform.HDS_MANUAL_CALIBRATION_TRIM = None
 
 #: A settings path that is never written and never present, so every App built in
 #: a test starts unconfigured: no serial to open, no trim to apply.
-scope_setup.DEFAULT_PATH = os.path.join(tempfile.gettempdir(),
+bench.DEFAULT_PATH = os.path.join(tempfile.gettempdir(),
                                         "scope_setup_never_written_by_tests.json")
-if os.path.exists(scope_setup.DEFAULT_PATH):                 # pragma: no cover - env
+if os.path.exists(bench.DEFAULT_PATH):                 # pragma: no cover - env
     try:
-        os.remove(scope_setup.DEFAULT_PATH)
+        os.remove(bench.DEFAULT_PATH)
     except OSError:
         pass

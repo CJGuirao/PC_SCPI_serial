@@ -15,7 +15,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from owon_controller import OWONScopeController
-from scope_setup import ScopeSetup
+from modernlab.settings.bench import ScopeSetup
 
 
 class PanelTestCase(unittest.TestCase):
@@ -32,8 +32,8 @@ class PanelTestCase(unittest.TestCase):
                      "ACQ_TYPES", "AVG_COUNTS", "MEMORY_DEPTHS", "TRIGGER_SLOPES"):
             setattr(self.scope, name, getattr(OWONScopeController, name))
         self.scope.parse_scale = OWONScopeController.parse_scale
-        self.scope.waveform_data = Mock()
-        self.scope.waveform_data.channels = []
+        self.scope.waveform = Mock()
+        self.scope.waveform.channels = []
         self.app.scope = self.scope
         self.folder = tempfile.TemporaryDirectory()
         self.path = os.path.join(self.folder.name, "scope_setup.json")
@@ -109,8 +109,8 @@ class SetupDialogTests(PanelTestCase):
         self.assertIsNone(dialog.collect().usb_serial)
 
     def test_save_and_apply_writes_the_file_and_moves_the_decode(self):
-        import waveform_data
-        before = waveform_data.HDS_MANUAL_CALIBRATION_TRIM
+        from modernlab.instrument.capture import waveform
+        before = waveform.HDS_MANUAL_CALIBRATION_TRIM
         try:
             dialog = self.open_dialog()
             dialog.trim.set("0.5")
@@ -118,30 +118,30 @@ class SetupDialogTests(PanelTestCase):
             self.assertTrue(os.path.exists(self.path))
             with open(self.path, "r", encoding="utf-8") as handle:
                 self.assertAlmostEqual(0.5, json.load(handle)["calibration_trim"], places=9)
-            self.assertAlmostEqual(0.5, waveform_data.HDS_MANUAL_CALIBRATION_TRIM, places=9)
+            self.assertAlmostEqual(0.5, waveform.HDS_MANUAL_CALIBRATION_TRIM, places=9)
             self.assertAlmostEqual(0.5, self.app.setup.calibration_trim, places=9)
         finally:
-            waveform_data.HDS_MANUAL_CALIBRATION_TRIM = before
+            waveform.HDS_MANUAL_CALIBRATION_TRIM = before
 
     def test_save_alone_writes_the_file_without_applying_it(self):
-        import waveform_data
-        before = waveform_data.HDS_MANUAL_CALIBRATION_TRIM
+        from modernlab.instrument.capture import waveform
+        before = waveform.HDS_MANUAL_CALIBRATION_TRIM
         try:
             dialog = self.open_dialog()
             dialog.trim.set("0.25")
             dialog.save_only()
             with open(self.path, "r", encoding="utf-8") as handle:
                 self.assertAlmostEqual(0.25, json.load(handle)["calibration_trim"], places=9)
-            self.assertEqual(before, waveform_data.HDS_MANUAL_CALIBRATION_TRIM)
+            self.assertEqual(before, waveform.HDS_MANUAL_CALIBRATION_TRIM)
         finally:
-            waveform_data.HDS_MANUAL_CALIBRATION_TRIM = before
+            waveform.HDS_MANUAL_CALIBRATION_TRIM = before
 
     def test_calibrate_now_turns_the_last_capture_into_a_trim(self):
         self.app.setup = ScopeSetup({"known_amplitude": 25.0}, path=self.path)
         dialog = self.open_dialog()
         # A capture showing 25.8 Vpp for a generator set to 25.0.
-        self.scope.waveform_data.channels = [
-            {"name": "CH1", "units": "V", "waveform_data": [-12.9, 12.9]}]
+        self.scope.waveform.channels = [
+            {"name": "CH1", "units": "V", "waveform": [-12.9, 12.9]}]
         with patch.object(self.app, "last_capture_amplitude", return_value=25.8):
             dialog.derive_trim()
         self.assertAlmostEqual(25.0 / 25.80, float(dialog.trim.get()), places=6)
@@ -155,10 +155,10 @@ class SetupDialogTests(PanelTestCase):
         self.assertAlmostEqual(1.0, float(dialog.trim.get()), places=9)
 
     def test_the_capture_amplitude_is_read_the_way_the_panel_shows_it(self):
-        self.scope.waveform_data.channels = [
-            {"name": "CH1", "units": "V", "waveform_data": [-12.8, 0.0, 12.8]}]
+        self.scope.waveform.channels = [
+            {"name": "CH1", "units": "V", "waveform": [-12.8, 0.0, 12.8]}]
         self.assertAlmostEqual(25.6, self.app.last_capture_amplitude(), places=6)
-        self.scope.waveform_data.channels = []
+        self.scope.waveform.channels = []
         self.assertIsNone(self.app.last_capture_amplitude())
 
 

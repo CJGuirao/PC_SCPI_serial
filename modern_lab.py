@@ -3,7 +3,7 @@ import math
 import queue
 import threading
 
-from scope_io import PRIORITY_CAPTURE, PRIORITY_COMMAND, PRIORITY_REFRESH, ScopeIO
+from modernlab.app.io_worker import PRIORITY_CAPTURE, PRIORITY_COMMAND, PRIORITY_REFRESH, ScopeIO
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -13,9 +13,9 @@ from PIL import Image, ImageDraw, ImageTk
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.ticker import AutoMinorLocator, MaxNLocator
 
-import analysis
-import waveform_export
-from scope_setup import PROBE_CHOICES, ScopeSetup, device_label
+from modernlab import analysis
+from modernlab.storage import export
+from modernlab.settings.bench import PROBE_CHOICES, ScopeSetup, device_label
 
 PANEL = "#d5d4cf"
 INK = "#252a2c"
@@ -867,7 +867,7 @@ class ModernLabUI:
             self.auto_refresh_var.set(False)
             self.update_live_button()
             if not self._busy:
-                self.capture_state.set("CAPTURED" if self.scope.waveform_data.channels else "NO ACQUISITION")
+                self.capture_state.set("CAPTURED" if self.scope.waveform.channels else "NO ACQUISITION")
             if self._live_timer:
                 self.root.after_cancel(self._live_timer)
                 self._live_timer = None
@@ -1854,7 +1854,7 @@ class SetupDialog(tk.Toplevel):
 
     def rescan(self):
         """Look again for attached scopes - a candidate is usually plugged in live."""
-        from scope_setup import attached_scopes
+        from modernlab.settings.bench import attached_scopes
         self._devices = attached_scopes()
         self.device_box.configure(values=self._device_labels())
         self.device_choice.set(self._device_default())

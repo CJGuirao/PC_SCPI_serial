@@ -10,7 +10,7 @@ from typing import Optional
 import serial
 from serial.tools import list_ports
 
-from waveform_data import (WaveformData, HDS_HORIZONTAL_DIVISIONS, HDS_VERTICAL_DIVISIONS,
+from modernlab.instrument.capture.waveform import (WaveformData, HDS_HORIZONTAL_DIVISIONS, HDS_VERTICAL_DIVISIONS,
                            HDS_CODES_PER_DIVISION)
 
 
@@ -40,7 +40,7 @@ class OWONScopeController:
         self.connection = None
         self.connection_type = None
         self.is_connected = False
-        self.waveform_data = WaveformData()
+        self.waveform = WaveformData()
         self.lock = threading.Lock()
         # Filled in by identify_model() once the instrument answers *IDN?.
         self.series = self.family
@@ -449,7 +449,7 @@ class OWONScopeController:
         if not payload:
             return False
 
-        self.waveform_data.parse_hds_capture(header, {f"CH{channel}": payload})
+        self.waveform.parse_hds_capture(header, {f"CH{channel}": payload})
         return True
 
     def download_waveform_data(self):
@@ -482,8 +482,8 @@ class OWONScopeController:
                         channel_payloads["CH1"] = payload
                 if not channel_payloads:
                     return False
-                self.waveform_data.parse_hds_capture(header, channel_payloads)
-                return bool(self.waveform_data.channels)
+                self.waveform.parse_hds_capture(header, channel_payloads)
+                return bool(self.waveform.channels)
 
             # Legacy OWON SDS-compatible capture path
             self.send_command("STARTMEMDEPTH")
@@ -496,9 +496,9 @@ class OWONScopeController:
             file_length = struct.unpack('<I', header_data[0:4])[0]
             if file_length <= 0:
                 return False
-            waveform_data = self._read_binary_packet(timeout=15)
-            if waveform_data and len(waveform_data) >= file_length:
-                self.waveform_data.parse_bin_data(waveform_data, file_length)
+            waveform = self._read_binary_packet(timeout=15)
+            if waveform and len(waveform) >= file_length:
+                self.waveform.parse_bin_data(waveform, file_length)
                 return True
         except Exception as exc:
             logging.error("Error downloading waveform data: %s", exc)
@@ -524,7 +524,7 @@ class OWONScopeController:
     def find_hds_device(self):
         """Info for the first OWON HDS device on USB, or None."""
         try:
-            from hds_usb import list_owon_devices
+            from modernlab.instrument.transport.usb_hid import list_owon_devices
             devices = list_owon_devices()
         except Exception as exc:
             logging.error("USB scan error: %s", exc)
@@ -534,7 +534,7 @@ class OWONScopeController:
     def connect_usb_hid(self, serial=None, timeout=2.0):
         """Connect over the raw USB HID interface.  Works with any driver."""
         try:
-            from hds_usb import HdsHidTransport
+            from modernlab.instrument.transport.usb_hid import HdsHidTransport
             transport = HdsHidTransport(serial=serial, timeout=timeout)
             transport.open()
             self.connection = transport
@@ -972,7 +972,7 @@ class OWONScopeController:
 
     # -- acquisition --------------------------------------------------------
     def download_waveform_data(self, calibrate=False, reuse_header=False):
-        """Capture the on-screen waveform into ``self.waveform_data``.
+        """Capture the on-screen waveform into ``self.waveform``.
 
         ``reuse_header=True`` re-parses against the last header instead of
         asking for it again. The header is 479 bytes and the payload 604, over
@@ -1019,11 +1019,11 @@ class OWONScopeController:
                 logging.error("Capture returned no channel payloads")
                 return False
 
-            self.waveform_data = WaveformData()
-            self.waveform_data.parse_hds_capture(
+            self.waveform = WaveformData()
+            self.waveform.parse_hds_capture(
                 header, channel_payloads,
                 calibrated_volts_per_code=self._calibrated_volts_per_code)
-            if not self.waveform_data.channels:
+            if not self.waveform.channels:
                 return False
             if calibrate:
                 self.calibrate_capture()
@@ -1178,12 +1178,12 @@ class OWONScopeController:
         verdict = {"channel": channel, "volts_per_div": None, "decoded_vrms": None,
                    "instrument_vrms": None, "relative_error": None,
                    "conclusive": False, "consistent": False, "reason": ""}
-        if not self.is_hds or not self.waveform_data.channels:
+        if not self.is_hds or not self.waveform.channels:
             verdict["reason"] = "no capture available; call download_waveform_data() first"
             return verdict
 
         entry = None
-        for candidate in self.waveform_data.channels:
+        for candidate in self.waveform.channels:
             if str(candidate.get("name", "")).upper() == "CH%s" % channel:
                 entry = candidate
                 break
@@ -1192,7 +1192,7 @@ class OWONScopeController:
             return verdict
 
         verdict["volts_per_div"] = entry.get("volts_per_div")
-        volts = entry.get("waveform_data") or []
+        volts = entry.get("waveform") or []
         if not volts:
             verdict["reason"] = "capture holds no samples for CH%s" % channel
             return verdict
@@ -1235,14 +1235,14 @@ class OWONScopeController:
         decode correctly without paying for the measurement block again.
         """
         measurements = {}
-        for entry in self.waveform_data.channels:
+        for entry in self.waveform.channels:
             name = str(entry.get("name", "CH1")).upper()
             channel_number = name[2:] if name[:2].upper() == "CH" else name
             measurements.update(self.get_measurements_numeric(channel_number))
-        calibrated = self.waveform_data.calibrate_from_measurements(
+        calibrated = self.waveform.calibrate_from_measurements(
             measurements, channel=channel, pin_extremes=pin_extremes)
         if calibrated:
-            for entry in self.waveform_data.channels:
+            for entry in self.waveform.channels:
                 slope = entry.get("voltage_per_point")
                 if slope:
                     self._calibrated_volts_per_code = slope
@@ -1373,16 +1373,16 @@ class OWONScopeController:
         derived from them instead.
         """
         entry = None
-        for item in self.waveform_data.channels or []:
+        for item in self.waveform.channels or []:
             if str(item.get("name") or "").upper().endswith(str(channel)):
                 entry = item
                 break
-        if entry is None and self.waveform_data.channels:
-            entry = self.waveform_data.channels[0]
+        if entry is None and self.waveform.channels:
+            entry = self.waveform.channels[0]
         if not entry:
             return {}
 
-        data = [value for value in entry.get("waveform_data") or [] if value is not None]
+        data = [value for value in entry.get("waveform") or [] if value is not None]
         interval = entry.get("point_interval")
         if len(data) < 4 or not interval or interval <= 0:
             return {}
@@ -1430,7 +1430,7 @@ class OWONScopeController:
         if not self.is_hds:
             report["notes"].append("auto framing is implemented for HDS models only")
             return report
-        if not self.waveform_data.channels:
+        if not self.waveform.channels:
             if not self.download_waveform_data():
                 report["notes"].append("no capture available to measure")
                 return report

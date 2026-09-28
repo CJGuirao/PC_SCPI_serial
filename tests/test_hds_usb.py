@@ -1,6 +1,6 @@
 ﻿import unittest
 
-from hds_usb import REPORT_SIZE, HdsHidTransport
+from modernlab.instrument.transport.usb_hid import REPORT_SIZE, HdsHidTransport
 
 
 class FakeEndpoint:

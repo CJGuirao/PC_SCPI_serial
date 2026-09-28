@@ -14,11 +14,11 @@ from matplotlib.figure import Figure
 from modern_lab import PRIORITY_REFRESH, ModernLabUI
 import os
 
-import analysis
-import waveform_export
+from modernlab import analysis
+from modernlab.storage import export
 from owon_controller import OWONScopeController
-from scope_setup import ScopeSetup, attached_scopes
-from waveform_data import HDS_HORIZONTAL_DIVISIONS, HDS_VERTICAL_DIVISIONS, WaveformData
+from modernlab.settings.bench import ScopeSetup, attached_scopes
+from modernlab.instrument.capture.waveform import HDS_HORIZONTAL_DIVISIONS, HDS_VERTICAL_DIVISIONS, WaveformData
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
@@ -439,7 +439,7 @@ class App(ModernLabUI):
         text = self.timebase_position_text(seconds)
         self.tell_scope("Horizontal position -> %g div (%s)" % (divisions, text),
                         lambda scope, value=text: scope.set_timebase_offset(value))
-        if self.scope.waveform_data.channels:
+        if self.scope.waveform.channels:
             self.plot_waveform()
 
     def set_trigger_mode(self):
@@ -474,7 +474,7 @@ class App(ModernLabUI):
             self.tell_scope("Trigger level -> %s" % self.trigger_level.get(),
                             lambda scope, value=value: getattr(
                                 scope, "set_edge_trigger_level", scope.set_trigger_level)(value))
-            if self.scope.waveform_data.channels:
+            if self.scope.waveform.channels:
                 self.plot_waveform()
 
     def set_acquire_type(self):
@@ -740,8 +740,8 @@ class App(ModernLabUI):
         the panel reads it: the channel it is already drawing, with the trim in
         force included.
         """
-        for entry in getattr(self.scope.waveform_data, "channels", []) or []:
-            volts = entry.get("waveform_data") or []
+        for entry in getattr(self.scope.waveform, "channels", []) or []:
+            volts = entry.get("waveform") or []
             if len(volts) > 1:
                 return float(max(volts) - min(volts))
         return None
@@ -1135,7 +1135,7 @@ class App(ModernLabUI):
         the volts/div the instrument reports, and it only moves while the user has
         not pinned a value of their own on it.
         """
-        for channel in getattr(self.scope.waveform_data, "channels", []) or []:
+        for channel in getattr(self.scope.waveform, "channels", []) or []:
             name = str(channel.get("name", "")).upper()
             if not name.startswith("CH") or not name[2:].isdigit():
                 continue
@@ -1250,7 +1250,7 @@ class App(ModernLabUI):
         # there is no next frame, so ask for one.
         if self.auto_refresh_var.get():
             return
-        if getattr(self.scope.waveform_data, "channels", None):
+        if getattr(self.scope.waveform, "channels", None):
             self.download_waveform()
 
     @staticmethod
@@ -1261,7 +1261,7 @@ class App(ModernLabUI):
 
     def captured_channel(self, number):
         """The capture entry for a channel number, or an empty one."""
-        for entry in getattr(self.scope.waveform_data, "channels", []) or []:
+        for entry in getattr(self.scope.waveform, "channels", []) or []:
             if self.channel_number(entry) == number:
                 return entry
         return {}
@@ -1352,7 +1352,7 @@ class App(ModernLabUI):
         Quantised to an eighth of a row, so the extremes' own frame-to-frame jitter
         cannot make the grid drift while acquisition runs.
         """
-        samples = [v for v in (entry.get("waveform_data") or [])
+        samples = [v for v in (entry.get("waveform") or [])
                    if isinstance(v, (int, float))]
         if not samples:
             return 0.0
@@ -1383,7 +1383,7 @@ class App(ModernLabUI):
         for channel in channels:
             number = self.channel_number(channel)
             volts_per_div = self.display_scale_value(number, channel) if number else None
-            samples = channel.get("waveform_data") or []
+            samples = channel.get("waveform") or []
             if not volts_per_div or not samples or channel.get("units") != "V":
                 continue
             half = (HDS_VERTICAL_DIVISIONS / 2.0) * volts_per_div
@@ -1479,7 +1479,7 @@ class App(ModernLabUI):
     # Views: one capture, four ways of reading it
     def capture_channels(self):
         """The channels of whatever is being shown - a live capture or an open file."""
-        return list(getattr(self.scope.waveform_data, "channels", []) or [])
+        return list(getattr(self.scope.waveform, "channels", []) or [])
 
     def analysis_channel(self, name=None):
         """The channel dict the analysis views work on, by name or by the panel's pick."""
@@ -1702,7 +1702,7 @@ class App(ModernLabUI):
         read.
         """
         try:
-            settings, channels = waveform_export.read_capture(path)
+            settings, channels = export.read_capture(path)
         except Exception as exc:
             self.log("Could not open %s: %s" % (path, exc), "ERROR")
             messagebox.showerror("Open capture", "Could not open that file:\n%s" % exc)
@@ -1712,8 +1712,8 @@ class App(ModernLabUI):
             return None
         if self.auto_refresh_var.get():
             self.toggle_live()
-        loaded = waveform_export.LoadedCapture(channels, settings, source=os.path.basename(path))
-        self.scope.waveform_data = loaded
+        loaded = export.LoadedCapture(channels, settings, source=os.path.basename(path))
+        self.scope.waveform = loaded
         self._loaded_capture = loaded
         self.capture_state.set("FILE \u2022 %s" % os.path.basename(path))
         self.device_info.set(loaded.describe())
@@ -1807,7 +1807,7 @@ class App(ModernLabUI):
         for channel in self.capture_channels():
             name = str(channel.get("name", "CH1")).upper()
             rows.append(("Captured %s scale" % name, channel.get("volts_per_div")))
-            rows.append(("Captured %s points" % name, len(channel.get("waveform_data") or [])))
+            rows.append(("Captured %s points" % name, len(channel.get("waveform") or [])))
             rows.append(("Captured %s interval" % name,
                          analysis.format_seconds(analysis.point_interval(channel))))
         return rows
@@ -1948,23 +1948,23 @@ class App(ModernLabUI):
         # frame does not wait for a file. A write that fails still stops the
         # recording, which is the point of leaving it running unattended.
         self.ask_scope("record",
-                       lambda scope: waveform_export.write_csv(path, channels, provenance),
+                       lambda scope: export.write_csv(path, channels, provenance),
                        priority=PRIORITY_REFRESH)
         return path
 
     def provenance_block(self):
         """The settings an exported capture is only checkable with."""
-        waveform = getattr(self.scope, "waveform_data", None)
+        waveform = getattr(self.scope, "waveform", None)
         channel = self.analysis_channel()
         options = getattr(self, "_fft_options", {})
-        return waveform_export.provenance(
+        return export.provenance(
             model=getattr(waveform, "model", "") or getattr(self.scope, "model", ""),
             serial=getattr(self.scope, "serial_number", ""),
             firmware=getattr(self.scope, "firmware", ""),
             timebase_scale_s=getattr(waveform, "timebase_scale", None),
             sample_rate=getattr(waveform, "sample_rate", ""),
             point_interval_s=analysis.point_interval(channel) if channel else None,
-            points=len(channel.get("waveform_data") or []) if channel else 0,
+            points=len(channel.get("waveform") or []) if channel else 0,
             window=options.get("window"),
             fft_format=options.get("format"),
             view=getattr(self, "_view", "time"),
@@ -1991,7 +1991,7 @@ class App(ModernLabUI):
         # trace that has data and applied to all of them.
         factor, unit, span = 1.0, "s", None
         for channel in channels:
-            samples = channel.get("waveform_data") or []
+            samples = channel.get("waveform") or []
             interval = float(channel.get("point_interval", 0) or 0)
             if samples and interval:
                 factor, unit = self.time_axis_units(interval * (len(samples) - 1))
@@ -2009,7 +2009,7 @@ class App(ModernLabUI):
         for channel in channels:
             name = str(channel.get("name", "CH1")).upper()
             color = palette.get(name, "#9cdc9c")
-            y = np.asarray(channel.get("waveform_data", []), dtype=float)
+            y = np.asarray(channel.get("waveform", []), dtype=float)
             if y.size == 0:
                 continue
             # The amplitudes are the instrument's own volts, already at the BNC:
@@ -2039,7 +2039,7 @@ class App(ModernLabUI):
         # is 12 columns at the selected time/div. The capture says what the
         # timebase is, which keeps a square exactly one division; without it the
         # samples themselves decide the window.
-        timebase = getattr(self.scope.waveform_data, "timebase_scale", None)
+        timebase = getattr(self.scope.waveform, "timebase_scale", None)
         window = span
         if isinstance(timebase, (int, float)) and timebase:
             window = float(timebase) * HDS_HORIZONTAL_DIVISIONS * factor
@@ -2230,7 +2230,7 @@ class App(ModernLabUI):
         if not path:
             return
         try:
-            described = waveform_export.export_capture(path, channels,
+            described = export.export_capture(path, channels,
                                                       self.provenance_block(), figure=self.fig)
         except Exception as exc:
             self.log("Save failed: %s" % exc, "ERROR")

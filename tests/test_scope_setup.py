@@ -10,8 +10,8 @@ import os
 import tempfile
 import unittest
 
-import waveform_data
-from scope_setup import (DEFAULT_PATH, SETTINGS_VERSION, PROBE_CHOICES, ScopeSetup,
+from modernlab.instrument.capture import waveform
+from modernlab.settings.bench import (DEFAULT_PATH, SETTINGS_VERSION, PROBE_CHOICES, ScopeSetup,
                          device_label)
 
 
@@ -28,13 +28,13 @@ class SetupDefaultsTests(unittest.TestCase):
         self.assertIn("first attached", setup.as_text())
 
     def test_applying_the_defaults_changes_nothing(self):
-        before = waveform_data.HDS_MANUAL_CALIBRATION_TRIM
+        before = waveform.HDS_MANUAL_CALIBRATION_TRIM
         try:
             changed = ScopeSetup().apply()
-            self.assertIsNone(waveform_data.HDS_MANUAL_CALIBRATION_TRIM)
+            self.assertIsNone(waveform.HDS_MANUAL_CALIBRATION_TRIM)
             self.assertIn("untrimmed", " ".join(changed))
         finally:
-            waveform_data.HDS_MANUAL_CALIBRATION_TRIM = before
+            waveform.HDS_MANUAL_CALIBRATION_TRIM = before
 
     def test_a_missing_file_is_not_a_condition_to_fix(self):
         missing = os.path.join(tempfile.gettempdir(), "scope_setup_that_is_not_there.json")
@@ -92,7 +92,7 @@ class SetupRoundTripTests(unittest.TestCase):
     def test_an_unwritable_path_reports_failure_rather_than_raising(self):
         setup = ScopeSetup(path=os.path.join(tempfile.gettempdir(), "no_such_dir_xyz",
                                              "sub", "file.json"))
-        weird = os.path.join(tempfile.gettempdir(), "scope_setup.\\/:*?\"<>|")
+        weird = os.path.join(tempfile.gettempdir(), "bench.\\/:*?\"<>|")
         setup.path = weird
         self.assertFalse(setup.save())
 
@@ -136,38 +136,38 @@ class SetupApplyTests(unittest.TestCase):
     """Applying has to reach the decode, and has to be reversible."""
 
     def setUp(self):
-        self.trim = waveform_data.HDS_MANUAL_CALIBRATION_TRIM
-        self.reference = waveform_data.HDS_REFERENCE_VOLTS_PER_CODE_TIP_10X
+        self.trim = waveform.HDS_MANUAL_CALIBRATION_TRIM
+        self.reference = waveform.HDS_REFERENCE_VOLTS_PER_CODE_TIP_10X
 
     def tearDown(self):
-        waveform_data.HDS_MANUAL_CALIBRATION_TRIM = self.trim
-        waveform_data.HDS_REFERENCE_VOLTS_PER_CODE_TIP_10X = self.reference
+        waveform.HDS_MANUAL_CALIBRATION_TRIM = self.trim
+        waveform.HDS_REFERENCE_VOLTS_PER_CODE_TIP_10X = self.reference
 
     def test_a_trim_reaches_the_decode(self):
         changed = ScopeSetup({"calibration_trim": 0.5}).apply()
-        self.assertAlmostEqual(0.5, waveform_data.HDS_MANUAL_CALIBRATION_TRIM, places=9)
+        self.assertAlmostEqual(0.5, waveform.HDS_MANUAL_CALIBRATION_TRIM, places=9)
         self.assertIn("x0.5", " ".join(changed))
 
     def test_a_reference_reaches_the_decode(self):
         ScopeSetup({"reference_volts_per_code": 0.15625}).apply()
         self.assertAlmostEqual(0.15625,
-                               waveform_data.HDS_REFERENCE_VOLTS_PER_CODE_TIP_10X, places=9)
+                               waveform.HDS_REFERENCE_VOLTS_PER_CODE_TIP_10X, places=9)
 
     def test_an_unset_reference_leaves_the_modules_value_alone(self):
-        waveform_data.HDS_REFERENCE_VOLTS_PER_CODE_TIP_10X = 0.1449
+        waveform.HDS_REFERENCE_VOLTS_PER_CODE_TIP_10X = 0.1449
         ScopeSetup().apply()
         self.assertAlmostEqual(0.1449,
-                               waveform_data.HDS_REFERENCE_VOLTS_PER_CODE_TIP_10X, places=9)
+                               waveform.HDS_REFERENCE_VOLTS_PER_CODE_TIP_10X, places=9)
 
     def test_an_applied_trim_decodes_a_capture_away_from_the_instrument(self):
         # End to end through the real decode: the trim has to move the volts, or
         # the whole feature is decorative.
         from tests.test_hds_controller import hds_header, hds_payload
-        waveform_data.HDS_MANUAL_CALIBRATION_TRIM = None
-        plain = waveform_data.WaveformData()
+        waveform.HDS_MANUAL_CALIBRATION_TRIM = None
+        plain = waveform.WaveformData()
         plain.parse_hds_capture(hds_header("500mv"), {"CH1": hds_payload([113, 131, 149])})
         ScopeSetup({"calibration_trim": 0.5}).apply()
-        trimmed = waveform_data.WaveformData()
+        trimmed = waveform.WaveformData()
         trimmed.parse_hds_capture(hds_header("500mv"), {"CH1": hds_payload([113, 131, 149])})
         self.assertAlmostEqual(plain.channels[0]["voltage_per_point"] * 0.5,
                                trimmed.channels[0]["voltage_per_point"], places=9)

@@ -9,7 +9,7 @@ import unittest
 
 import numpy as np
 
-import analysis
+from modernlab import analysis
 from owon_controller import OWONScopeController
 
 SAMPLE_INTERVAL = 2e-05          # 20 us per point, what a SCREEN capture really is
@@ -21,7 +21,7 @@ def sine_channel(frequency=3000.0, amplitude=2.5, interval=SAMPLE_INTERVAL,
     """A channel dict shaped like the decoder produces, with a known sine in it."""
     times = np.arange(points, dtype=float) * interval
     volts = offset + amplitude * np.sin(2.0 * math.pi * frequency * times)
-    return {"name": "CH1", "waveform_data": list(volts),
+    return {"name": "CH1", "waveform": list(volts),
             "point_interval": interval, "num_points": points}
 
 
@@ -100,7 +100,7 @@ class SpectrumTests(unittest.TestCase):
     def test_a_square_wave_reports_its_fundamental_first(self):
         times = np.arange(POINTS, dtype=float) * SAMPLE_INTERVAL
         volts = 12.5 * np.sign(np.sin(2.0 * math.pi * 1000.0 * times))
-        channel = {"name": "CH1", "waveform_data": list(volts), "point_interval": SAMPLE_INTERVAL}
+        channel = {"name": "CH1", "waveform": list(volts), "point_interval": SAMPLE_INTERVAL}
         peaks = analysis.spectrum_peaks(analysis.fft_spectrum(channel, window="rectangle"), count=3)
         self.assertAlmostEqual(peaks[0]["frequency"], 1000.0, delta=200.0)
         # A square wave's next component is its third harmonic.

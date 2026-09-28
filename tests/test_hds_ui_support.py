@@ -6,9 +6,9 @@ from unittest.mock import patch
 
 import modern_lab
 from owon_controller import OWONScopeController
-from waveform_data import WaveformData
+from modernlab.instrument.capture.waveform import WaveformData
 from unittest.mock import Mock, patch
-from waveform_data import HDS_VERTICAL_DIVISIONS
+from modernlab.instrument.capture.waveform import HDS_VERTICAL_DIVISIONS
 
 
 class InstrumentShapeTests(unittest.TestCase):
@@ -53,9 +53,9 @@ class AutoFrameTests(unittest.TestCase):
 
     def test_frame_from_trace_measures_a_square_wave(self):
         scope = OWONScopeController(family="hds")
-        scope.waveform_data.channels = [dict(
+        scope.waveform.channels = [dict(
             name="CH1", point_interval=1e-4,
-            waveform_data=[-1.0] * 5 + [1.0] * 5 + [-1.0] * 5 + [1.0] * 5)]
+            waveform=[-1.0] * 5 + [1.0] * 5 + [-1.0] * 5 + [1.0] * 5)]
         trace = scope.frame_from_trace(1)
         # Two rising edges 10 samples apart at 100us is one period: 1kHz.
         self.assertAlmostEqual(trace["frequency"], 1000.0, delta=1.0)
@@ -64,15 +64,15 @@ class AutoFrameTests(unittest.TestCase):
 
     def test_frame_from_trace_survives_a_flat_trace(self):
         scope = OWONScopeController(family="hds")
-        scope.waveform_data.channels = [dict(
-            name="CH1", point_interval=1e-4, waveform_data=[0.5] * 20)]
+        scope.waveform.channels = [dict(
+            name="CH1", point_interval=1e-4, waveform=[0.5] * 20)]
         trace = scope.frame_from_trace(1)
         self.assertNotIn("frequency", trace)
         self.assertAlmostEqual(trace["vpp"], 0.0, places=6)
 
     def test_frame_from_trace_without_a_capture_is_empty(self):
         scope = OWONScopeController(family="hds")
-        scope.waveform_data.channels = []
+        scope.waveform.channels = []
         self.assertEqual({}, scope.frame_from_trace(1))
 
 
@@ -111,8 +111,8 @@ class PanelTestCase(unittest.TestCase):
             setattr(self.scope, name, getattr(OWONScopeController, name))
         # A spec'd Mock mocks the static helpers too, and the real code calls them.
         self.scope.parse_scale = OWONScopeController.parse_scale
-        self.scope.waveform_data = Mock()
-        self.scope.waveform_data.channels = []
+        self.scope.waveform = Mock()
+        self.scope.waveform.channels = []
         self.app.scope = self.scope
 
     def tearDown(self):
@@ -754,10 +754,10 @@ class VerticalFrameTests(PanelTestCase):
                                        else true_volts_per_div),
                 "volts_per_code_source": "instrument measurements",
                 "vertical_offset_div": offset_div, "attenuation": attenuation,
-                "point_interval": 1e-4, "waveform_data": [0.0, 1.0, -1.0]}
+                "point_interval": 1e-4, "waveform": [0.0, 1.0, -1.0]}
 
     def frame_of(self, *channels):
-        self.scope.waveform_data.channels = list(channels)
+        self.scope.waveform.channels = list(channels)
         with patch.object(self.app, "sync_vertical_controls"):
             self.app.plot_waveform()
         return self.app.ax.get_ylim()
@@ -788,7 +788,7 @@ class VerticalFrameTests(PanelTestCase):
         # well made the two cancel out, so the trace held still and the grid slid -
         # and a reading taken against a sliding grid is worth nothing.
         channel = self.channel(5.0)
-        self.scope.waveform_data.channels = [channel]
+        self.scope.waveform.channels = [channel]
         with patch.object(self.app, "sync_vertical_controls"):
             self.app.plot_waveform()
         low, high = self.app.ax.get_ylim()
@@ -808,7 +808,7 @@ class VerticalFrameTests(PanelTestCase):
         self.assertAlmostEqual(5.0, moved[1] - trace[1], places=9)
         # And the capture itself is untouched: the position is a view setting,
         # so no measurement or export can come back different for it.
-        self.assertEqual([0.0, 1.0, -1.0], list(channel["waveform_data"]))
+        self.assertEqual([0.0, 1.0, -1.0], list(channel["waveform"]))
 
     def test_every_enabled_channel_gets_a_zero_marker(self):
         # The point the trace refers to, and the only place an applied position is
@@ -823,7 +823,7 @@ class VerticalFrameTests(PanelTestCase):
         self.assertIn("CH1 0V", [text.get_text() for text in self.app.ax.texts])
 
     def test_a_moved_trace_carries_its_zero_marker_and_says_how_far(self):
-        self.scope.waveform_data.channels = [self.channel(5.0)]
+        self.scope.waveform.channels = [self.channel(5.0)]
         self.app._display_offset[1] = 5.0
         with patch.object(self.app, "sync_vertical_controls"):
             self.app.plot_waveform()
@@ -838,7 +838,7 @@ class VerticalFrameTests(PanelTestCase):
 
     def test_a_channel_with_no_trace_gets_no_marker(self):
         silent = self.channel(5.0)
-        silent["waveform_data"] = []
+        silent["waveform"] = []
         self.frame_of(self.channel(5.0), silent)
         self.assertEqual(["CH1"], [mark["name"] for mark in self.app._zero_marks])
 
@@ -846,7 +846,7 @@ class VerticalFrameTests(PanelTestCase):
         # One place to read them: with CH1 labelled on the left and CH2 on the
         # right, comparing two zero points meant looking at two edges for one
         # number each.
-        self.scope.waveform_data.channels = [self.channel(5.0),
+        self.scope.waveform.channels = [self.channel(5.0),
                                              dict(self.channel(5.0), name="CH2")]
         with patch.object(self.app, "sync_vertical_controls"):
             self.app.plot_waveform()
@@ -865,7 +865,7 @@ class VerticalFrameTests(PanelTestCase):
 
         def fraction_of_frame(volts_per_div):
             channel = self.channel(volts_per_div)
-            channel["waveform_data"] = data
+            channel["waveform"] = data
             low, high = self.frame_of(channel)
             return (max(data) - min(data)) / (high - low)
 
@@ -905,14 +905,14 @@ class FrontPanelSyncTests(PanelTestCase):
                 "true_volts_per_div": (volts_per_div if true_volts_per_div is None
                                        else true_volts_per_div),
                 "vertical_offset_div": 0.0, "attenuation": attenuation,
-                "point_interval": 1e-4, "waveform_data": [0.0, 1.0]}
+                "point_interval": 1e-4, "waveform": [0.0, 1.0]}
 
     def test_the_control_follows_the_decoded_scale_not_the_reported_one(self):
         # The control names volts per division, straight - no probe arithmetic,
         # because this instrument's readings are real volts at the BNC whatever
         # probe it announces. What it follows is what the capture DECODED to, never
         # the volts/div the instrument reports, which moves without the gain moving.
-        self.scope.waveform_data.channels = [self.channel(5.0)]
+        self.scope.waveform.channels = [self.channel(5.0)]
         self.app.plot_waveform()
         self.assertEqual("5v", self.app.ch1_scale.get())
 
@@ -923,13 +923,13 @@ class FrontPanelSyncTests(PanelTestCase):
         def reading():
             low, high = self.app.ax.get_ylim()
             row = (high - low) / 8.0
-            entry = self.scope.waveform_data.channels[0]
+            entry = self.scope.waveform.channels[0]
             ratio = self.app.display_ratio(1, entry)
-            data = [v * ratio for v in entry["waveform_data"]]
+            data = [v * ratio for v in entry["waveform"]]
             rows = (max(data) - min(data)) / row
             return row, rows, rows * row
 
-        self.scope.waveform_data.channels = [self.channel(2.0)]
+        self.scope.waveform.channels = [self.channel(2.0)]
         self.app.plot_waveform()
         auto_row, auto_rows, auto_volts = reading()
         self.assertEqual("2v", self.app.ch1_scale.get())
@@ -950,11 +950,11 @@ class FrontPanelSyncTests(PanelTestCase):
         # Measured with a 1X probe on the input: the instrument announced 10X and
         # still read the 25 Vpp signal as 25.6 V, so its volts are the volts at the
         # BNC. Multiplying by the announced probe put every amplitude out by ten.
-        self.scope.waveform_data.channels = [self.channel(20.0)]
+        self.scope.waveform.channels = [self.channel(20.0)]
         self.app.plot_waveform()
-        self.assertEqual(1.0, self.app.display_ratio(1, self.scope.waveform_data.channels[0]))
+        self.assertEqual(1.0, self.app.display_ratio(1, self.scope.waveform.channels[0]))
         self.app.set_channel_probe(1, "1X")
-        self.assertEqual(1.0, self.app.display_ratio(1, self.scope.waveform_data.channels[0]))
+        self.assertEqual(1.0, self.app.display_ratio(1, self.scope.waveform.channels[0]))
         self.assertIn("1X", self.app.ax.get_ylabel())
 
     def test_the_selected_volts_per_division_gives_the_divisions_the_user_expects(self):
@@ -962,14 +962,14 @@ class FrontPanelSyncTests(PanelTestCase):
         # 5 divisions, at 10 V/div is 2.5, at 1 V/div is 25. The grid must show that.
         volts = 25.6
         channel = self.channel(4.29, true_volts_per_div=4.29)
-        channel["waveform_data"] = [-volts / 2, volts / 2]
-        self.scope.waveform_data.channels = [channel]
+        channel["waveform"] = [-volts / 2, volts / 2]
+        self.scope.waveform.channels = [channel]
 
         def rows_at(selected):
             self.app.set_channel_scale(1, selected)
             low, high = self.app.ax.get_ylim()
             row = (high - low) / 8.0
-            data = [v * self.app.display_ratio(1, channel) for v in channel["waveform_data"]]
+            data = [v * self.app.display_ratio(1, channel) for v in channel["waveform"]]
             return row, (max(data) - min(data)) / row
 
         for selected, expected in (("5v", volts / 5), ("10v", volts / 10), ("1v", volts / 1)):
@@ -983,33 +983,33 @@ class FrontPanelSyncTests(PanelTestCase):
         # 20 V/div is not on the control (its ladder stops at 10v), so the row snaps
         # to 10 V/div and the axis says what the capture actually decoded to. The
         # amplitude is unaffected either way - rows x row is the signal at any scale.
-        self.scope.waveform_data.channels = [self.channel(20.0)]
+        self.scope.waveform.channels = [self.channel(20.0)]
         self.app.plot_waveform()
         self.assertEqual("10v", self.app.ch1_scale.get())
         self.assertIn("20 V/div", self.app.ax.get_ylabel())      # what it decoded to
         self.assertIn("10 V/div", self.app.ax.get_ylabel())      # what it drew with
 
     def test_a_reported_label_a_long_way_out_does_not_move_the_control(self):
-        self.scope.waveform_data.channels = [
+        self.scope.waveform.channels = [
             self.channel(50.0, true_volts_per_div=5.0)]
         self.app.plot_waveform()
         self.assertEqual("5v", self.app.ch1_scale.get())
 
     def test_a_probe_set_on_the_instrument_reaches_the_control(self):
-        self.scope.waveform_data.channels = [self.channel(0.2, attenuation="1X")]
+        self.scope.waveform.channels = [self.channel(0.2, attenuation="1X")]
         self.app.plot_waveform()
         self.assertEqual("X1", self.app.ch1_probe.get())
 
     def test_following_the_instrument_never_writes_back(self):
         # The control is a control, not a live one: syncing must not send a write.
-        self.scope.waveform_data.channels = [self.channel(2.0)]
+        self.scope.waveform.channels = [self.channel(2.0)]
         self.app.plot_waveform()
         self.scope.set_channel_scale.assert_not_called()
 
     def test_a_widget_already_showing_the_value_is_left_alone(self):
         # No churn on the control when it already names the decoded scale: a
         # Combobox rewritten every frame would fight the user's own selection.
-        self.scope.waveform_data.channels = [self.channel(10.0)]
+        self.scope.waveform.channels = [self.channel(10.0)]
         self.app.ch1_scale.set("10v")
         self.app.plot_waveform()
         self.assertEqual("10v", self.app.ch1_scale.get())
@@ -1068,7 +1068,7 @@ class ControlReadbackTests(PanelTestCase):
 
     CHANNEL = {"name": "CH1", "units": "V", "volts_per_div": 5.0,
                "true_volts_per_div": 5.0, "vertical_offset_div": 0.0,
-               "point_interval": 1e-4, "waveform_data": [0.0, 1.0]}
+               "point_interval": 1e-4, "waveform": [0.0, 1.0]}
 
     def settle_live(self, seconds=0.4):
         """Let a live control's debounce fire, the way a running panel would."""
@@ -1141,7 +1141,7 @@ class AutoFramingTests(PanelTestCase):
                 "volts_per_code_source": "instrument measurements",
                 "vertical_offset_div": 0.0, "attenuation": "10X",
                 "point_interval": 2e-5,
-                "waveform_data": [-span, 0.0, span]}
+                "waveform": [-span, 0.0, span]}
 
     def frame(self, volts_per_div):
         return {"low": -4.0 * volts_per_div, "high": 4.0 * volts_per_div}
@@ -1167,7 +1167,7 @@ class AutoFramingTests(PanelTestCase):
                  "true_volts_per_div": 3.187,
                  "volts_per_code_source": "instrument measurements",
                  "vertical_offset_div": 0.0, "attenuation": "10X",
-                 "point_interval": 2e-5, "waveform_data": [0.0, 12.7, 25.4]}
+                 "point_interval": 2e-5, "waveform": [0.0, 12.7, 25.4]}
         self.app._display_scale[1] = None                       # Auto
         frame = self.app.vertical_frame([entry])
         self.assertLessEqual(frame["low"], 0.0)
@@ -1188,7 +1188,7 @@ class AutoFramingTests(PanelTestCase):
 
     def test_the_panel_reports_it_rather_than_chopping_silently(self):
         entry = self.capture(3.187, span=12.7)
-        self.scope.waveform_data.channels = [entry]
+        self.scope.waveform.channels = [entry]
         self.app._display_scale[1] = "2v"
         self.app.plot_time()
         self.assertIn("off the grid", self.app.status_var.get())
@@ -1285,11 +1285,11 @@ class GraticuleTests(PanelTestCase):
                 "true_volts_per_div": (volts_per_div if true_volts_per_div is None
                                        else true_volts_per_div),
                 "vertical_offset_div": offset_div, "attenuation": "10X",
-                "point_interval": interval, "waveform_data": [0.0] * points}
+                "point_interval": interval, "waveform": [0.0] * points}
 
     def draw(self, channel, timebase=None):
-        self.scope.waveform_data.channels = [channel]
-        self.scope.waveform_data.timebase_scale = timebase
+        self.scope.waveform.channels = [channel]
+        self.scope.waveform.timebase_scale = timebase
         with patch.object(self.app, "sync_vertical_controls"):
             self.app.plot_waveform()
         return self.app.ax

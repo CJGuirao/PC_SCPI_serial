@@ -1,6 +1,6 @@
 ﻿import unittest
 
-from hds_usb import HdsHidTransport
+from modernlab.instrument.transport.usb_hid import HdsHidTransport
 
 
 class FakeDevice:

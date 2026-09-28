@@ -47,7 +47,7 @@ def channel_rows(channels):
     for channel in channels or []:
         name = str(channel.get("name", "CH1"))
         interval = float(channel.get("point_interval", 0) or 0)
-        for index, value in enumerate(channel.get("waveform_data") or []):
+        for index, value in enumerate(channel.get("waveform") or []):
             rows.append((name, index, index * interval, float(value)))
     return rows
 
@@ -175,7 +175,7 @@ def write_xlsx(path, channels, settings=None, sheet_label="Samples"):
                             channel.get("volts_per_div") or channel.get("scale") or "",
                             channel.get("probe") or "",
                             channel.get("coupling") or "",
-                            len(channel.get("waveform_data") or [])])
+                            len(channel.get("waveform") or [])])
     settings_rows = [["setting", "value"]]
     for key, value in (settings or {}).items():
         settings_rows.append([key, value])
@@ -294,7 +294,7 @@ class LoadedCapture:
         return "%s: %d channel(s), %d points" % (
             self.source or self.model,
             len(self.channels),
-            sum(len(channel.get("waveform_data") or []) for channel in self.channels))
+            sum(len(channel.get("waveform") or []) for channel in self.channels))
 
 
 def read_capture(path):
@@ -343,7 +343,7 @@ def _read_csv(path):
         if len(stamps) >= 2:
             gaps = sorted(stamps[index + 1] - stamps[index] for index in range(len(stamps) - 1))
             interval = gaps[len(gaps) // 2]                  # the median gap, not the first
-        channels.append({"name": name, "waveform_data": samples[name],
+        channels.append({"name": name, "waveform": samples[name],
                          "point_interval": interval, "num_points": len(samples[name]),
                          "whole_screen_points": len(samples[name])})
     return {}, channels

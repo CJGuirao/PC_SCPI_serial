@@ -4,10 +4,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import waveform_data
+from modernlab.instrument.capture import waveform
 
 from owon_controller import OWONScopeController
-from waveform_data import (WaveformData, HDS_CODES_PER_DIVISION,
+from modernlab.instrument.capture.waveform import (WaveformData, HDS_CODES_PER_DIVISION,
                             HDS_REFERENCE_VOLTS_PER_CODE_TIP_10X)
 
 
@@ -120,7 +120,7 @@ class HdsVerticalDecodeTests(unittest.TestCase):
         fine = self.decode("500mv", calibrated=0.1455)
         coarse = self.decode("5v", calibrated=0.1455)
         self.assertNotEqual(fine["volts_per_div"], coarse["volts_per_div"])
-        for a, b in zip(fine["waveform_data"], coarse["waveform_data"]):
+        for a, b in zip(fine["waveform"], coarse["waveform"]):
             self.assertAlmostEqual(a, b, places=9)
         self.assertAlmostEqual(fine["true_volts_per_div"], coarse["true_volts_per_div"],
                                places=9)
@@ -129,7 +129,7 @@ class HdsVerticalDecodeTests(unittest.TestCase):
         entry = self.decode("5v", calibrated=0.1455)
         self.assertAlmostEqual(0.1455, entry["voltage_per_point"], places=9)
         self.assertAlmostEqual((self.codes[0] - 128) * 0.1455,
-                               entry["waveform_data"][0], places=6)
+                               entry["waveform"][0], places=6)
         self.assertEqual("instrument measurements", entry["volts_per_code_source"])
 
     def test_the_true_division_is_the_decoded_scale(self):
@@ -148,7 +148,7 @@ class HdsVerticalDecodeTests(unittest.TestCase):
                                    {"CH1": hds_payload([57, 145, 233])},
                                    calibrated_volts_per_code=25.6 / 176.0)
         entry = waveform.channels[0]
-        volts = entry["waveform_data"]
+        volts = entry["waveform"]
         self.assertAlmostEqual(25.6, max(volts) - min(volts), places=2)
         # And the grid reading - rows x volts per row - gives the same number.
         rows = (max(volts) - min(volts)) / entry["true_volts_per_div"]
@@ -185,7 +185,7 @@ class HdsVerticalDecodeTests(unittest.TestCase):
 
     def test_a_manual_trim_scales_the_reference_decode(self):
         # With no calibration the trim lands on the decoded slope itself.
-        with patch.object(waveform_data, "HDS_MANUAL_CALIBRATION_TRIM", 0.5):
+        with patch.object(waveform, "HDS_MANUAL_CALIBRATION_TRIM", 0.5):
             entry = self.decode("500mv")
             self.assertAlmostEqual(HDS_REFERENCE_VOLTS_PER_CODE_TIP_10X * 0.5,
                                    entry["voltage_per_point"], places=9)
@@ -197,15 +197,18 @@ class HdsVerticalDecodeTests(unittest.TestCase):
         # so a trim applied to the slope instead would be cancelled out by the very
         # calibration it was meant to correct. Measured: with the pin left untrimmed
         # the app read 25.6-25.8 Vpp for a generator set to 25.0, trim and all.
-        waveform = WaveformData()
-        waveform.parse_hds_capture(hds_header("500mv"), {"CH1": self.payload})
-        untrimmed = waveform.channels[0]["voltage_per_point"]
-        waveform.calibrate_from_measurements(self.readings, pin_extremes=True)
-        pinned_untrimmed = waveform.channels[0]["voltage_per_point"]
+        # Named `plain`: `waveform` is the decode MODULE, which is what the trim below
+        # patches. A local of the same name shadows it and the patch lands on the
+        # instance instead, which quietly turns the test into a no-op.
+        plain = WaveformData()
+        plain.parse_hds_capture(hds_header("500mv"), {"CH1": self.payload})
+        untrimmed = plain.channels[0]["voltage_per_point"]
+        plain.calibrate_from_measurements(self.readings, pin_extremes=True)
+        pinned_untrimmed = plain.channels[0]["voltage_per_point"]
 
         trimmed_waveform = WaveformData()
         trimmed_waveform.parse_hds_capture(hds_header("500mv"), {"CH1": self.payload})
-        with patch.object(waveform_data, "HDS_MANUAL_CALIBRATION_TRIM", 0.5):
+        with patch.object(waveform, "HDS_MANUAL_CALIBRATION_TRIM", 0.5):
             self.assertTrue(trimmed_waveform.calibrate_from_measurements(
                 self.readings, pin_extremes=True))
         pinned_trimmed = trimmed_waveform.channels[0]["voltage_per_point"]
@@ -226,8 +229,8 @@ class HdsVerticalDecodeTests(unittest.TestCase):
     def test_the_position_label_does_not_move_the_decode(self):
         # The position is a display shift: writing one division of it over the
         # interface moved the captured codes by 0, so it cannot move volts.
-        centred = self.decode("500mv", offset=0, probe="10x")["waveform_data"]
-        shifted = self.decode("500mv", offset=1, probe="10x")["waveform_data"]
+        centred = self.decode("500mv", offset=0, probe="10x")["waveform"]
+        shifted = self.decode("500mv", offset=1, probe="10x")["waveform"]
         for base, moved in zip(centred, shifted):
             self.assertAlmostEqual(base, moved, places=9)
 
@@ -237,12 +240,12 @@ class HdsVerticalDecodeTests(unittest.TestCase):
         # the connector figure the instrument claims.
         calibrated = self.decode("500mv", probe="1x", calibrated=0.1455)
         through_10x = self.decode("500mv", probe="10x", calibrated=0.1455)
-        for a, b in zip(calibrated["waveform_data"], through_10x["waveform_data"]):
+        for a, b in zip(calibrated["waveform"], through_10x["waveform"]):
             self.assertAlmostEqual(a, b, places=9)
         uncalibrated_1x = self.decode("500mv", probe="1x")
         uncalibrated_10x = self.decode("500mv", probe="10x")
-        self.assertAlmostEqual(10.0, uncalibrated_10x["waveform_data"][0] /
-                               uncalibrated_1x["waveform_data"][0], places=4)
+        self.assertAlmostEqual(10.0, uncalibrated_10x["waveform"][0] /
+                               uncalibrated_1x["waveform"][0], places=4)
 
     def test_a_capture_without_a_scale_still_reports_its_source(self):
         entry = self.decode(None)
@@ -294,19 +297,19 @@ class WrappedCodeTests(unittest.TestCase):
         self.assertEqual("reference (uncalibrated)", waveform.channels[0]["volts_per_code_source"])
         self.assertTrue(waveform.calibrate_from_measurements(
             {"Vmin": "-5.0", "Vmax": "5.0", "Vpp": "10.0"}, pin_extremes=True))
-        self.assertAlmostEqual(10.0, max(waveform.channels[0]["waveform_data"])
-                               - min(waveform.channels[0]["waveform_data"]), places=2)
+        self.assertAlmostEqual(10.0, max(waveform.channels[0]["waveform"])
+                               - min(waveform.channels[0]["waveform"]), places=2)
 
     def test_the_decoded_span_is_the_signal_not_the_wrap(self):
         # 2 x 65 codes peak to peak. Without unwrapping the extremes are 65 and -65
         # plus a 256-code wrap, and the span comes out at about 320 codes.
         channel = self.decode(self.wrapped_sine(), volts_per_code=0.02)
-        volts = channel["waveform_data"]
+        volts = channel["waveform"]
         self.assertAlmostEqual(2.60, max(volts) - min(volts), delta=0.06)
 
     def test_nothing_in_the_trace_jumps_the_range(self):
         # The symptom on screen: a full-scale break twice per period.
-        volts = self.decode(self.wrapped_sine(), volts_per_code=0.02)["waveform_data"]
+        volts = self.decode(self.wrapped_sine(), volts_per_code=0.02)["waveform"]
         steps = [abs(b - a) for a, b in zip(volts, volts[1:])]
         self.assertLess(max(steps), 0.5)          # the largest real step is about 8 codes
 

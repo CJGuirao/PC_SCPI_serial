@@ -2,7 +2,7 @@
 
 Run from the repository root with the project virtual environment:
 
-    .venv\Scripts\python.exe hds_check.py
+    .venv\Scripts\python.exe tools\hds_check.py
 
 It prints the instrument identity, sweeps candidate SCPI commands so the HDS
 dialect can be confirmed against real hardware, then exercises the same link
@@ -10,10 +10,16 @@ through OWONScopeController.  Read-only apart from one block that sets benign
 values and reads them back.
 """
 
+import os
 import sys
 import time
 
-from hds_usb import HdsHidTransport, list_owon_devices
+# Run from the repository root. This script sits one directory below the package, and
+# a script's own directory is what Python puts on the path first, so the root has to be
+# added before `modernlab` can be imported.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from modernlab.instrument.transport.usb_hid import HdsHidTransport, list_owon_devices
 
 CHANNEL_CANDIDATES = [
     ":CH1:SCALe?",

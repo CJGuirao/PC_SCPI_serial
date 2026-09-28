@@ -18,8 +18,8 @@ class FrontPanelTests(unittest.TestCase):
         self.scope.is_connected = True
         for name in ("VOLTAGE_SCALES", "TIMEBASE_SCALES", "FRAMING_NAMES"):
             setattr(self.scope, name, getattr(OWONScopeController, name))
-        self.scope.waveform_data = Mock()
-        self.scope.waveform_data.channels = []
+        self.scope.waveform = Mock()
+        self.scope.waveform.channels = []
         self.app.scope = self.scope
 
     def tearDown(self):
@@ -81,8 +81,8 @@ class FrontPanelTests(unittest.TestCase):
         self.scope.invalidate_capture_header.assert_not_called()
 
     def test_capture_async_and_channel_identity(self):
-        self.scope.waveform_data.channels = [
-            dict(name="CH2", waveform_data=[0, 2, -2, 0], attenuation=0,
+        self.scope.waveform.channels = [
+            dict(name="CH2", waveform=[0, 2, -2, 0], attenuation=0,
                  voltage_per_point=10, point_interval=1)]
         self.scope.download_waveform_data.return_value = True
         self.app.download_waveform()

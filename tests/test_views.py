@@ -16,13 +16,13 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-import analysis
+from modernlab import analysis
 import modern_lab
-import waveform_export
+from modernlab.storage import export
 from main import App
 from modern_lab import SetupDialog
 from owon_controller import OWONScopeController
-from scope_setup import ScopeSetup
+from modernlab.settings.bench import ScopeSetup
 
 INTERVAL = 2e-05                      # 20 us per point: a real SCREEN capture
 POINTS = 400
@@ -32,7 +32,7 @@ def sine_channel(frequency=1000.0, amplitude=12.5, name="CH1", points=POINTS, in
     """A 25 Vpp sine by default: the signal that has been on the bench."""
     times = np.arange(points, dtype=float) * interval
     volts = amplitude * np.sin(2.0 * math.pi * frequency * times)
-    return {"name": name, "waveform_data": list(volts), "point_interval": interval,
+    return {"name": name, "waveform": list(volts), "point_interval": interval,
             "num_points": points, "whole_screen_points": points}
 
 
@@ -69,7 +69,7 @@ class ViewTestCase(unittest.TestCase):
         for name in ("VOLTAGE_SCALES", "TIMEBASE_SCALES", "FRAMING_NAMES", "AVG_COUNTS",
                      "HDS_MEASUREMENT_ITEMS"):
             setattr(scope, name, getattr(OWONScopeController, name, ()))
-        scope.waveform_data = waveform_export.LoadedCapture(
+        scope.waveform = export.LoadedCapture(
             channels if channels is not None else [sine_channel()], SETTINGS, source="test")
         return scope
 
@@ -245,9 +245,9 @@ class ExportTests(ViewTestCase):
         self.app.set_view("time")
         self.app.setup.values["calibration_trim"] = 0.968992
         path = self.path("capture.xlsx")
-        waveform_export.export_capture(path, self.app.capture_channels(),
+        export.export_capture(path, self.app.capture_channels(),
                                        self.app.provenance_block())
-        sheets = waveform_export.read_xlsx_sheets(path)
+        sheets = export.read_xlsx_sheets(path)
         found = {row[0]: row[1] for row in sheets["Settings"][1:] if len(row) >= 2}
         self.assertEqual(found["model"], "HDS271")
         self.assertEqual(found["serial"], "25520161")
@@ -255,19 +255,19 @@ class ExportTests(ViewTestCase):
         self.assertEqual(found["view"], "time")
 
     def test_a_saved_capture_can_be_opened_again(self):
-        path = waveform_export.write_csv(self.path("capture.csv"), self.app.capture_channels(),
+        path = export.write_csv(self.path("capture.csv"), self.app.capture_channels(),
                                         self.app.provenance_block())
         self.app.scope = self.fake_scope([])                     # nothing live any more
         loaded = self.app.load_capture_file(path)
         self.assertIsNotNone(loaded)
         self.assertEqual(len(loaded.channels), 1)
-        self.assertEqual(len(loaded.channels[0]["waveform_data"]), POINTS)
+        self.assertEqual(len(loaded.channels[0]["waveform"]), POINTS)
         # The interval is measured from the file rather than assumed.
         self.assertAlmostEqual(loaded.channels[0]["point_interval"], INTERVAL, delta=1e-9)
         self.assertIn("FILE", self.app.capture_state.get())
 
     def test_opening_a_file_stops_the_live_loop(self):
-        path = waveform_export.write_csv(self.path("capture.csv"), self.app.capture_channels(),
+        path = export.write_csv(self.path("capture.csv"), self.app.capture_channels(),
                                         self.app.provenance_block())
         self.app.auto_refresh_var.set(True)
         self.app.load_capture_file(path)
@@ -552,8 +552,8 @@ class RecordingTests(ViewTestCase):
         self.assertNotEqual(first, second)
         for path in (first, second):
             self.assertTrue(os.path.exists(path))
-            settings, channels = waveform_export.read_capture(path)
-            self.assertEqual(len(channels[0]["waveform_data"]), POINTS)
+            settings, channels = export.read_capture(path)
+            self.assertEqual(len(channels[0]["waveform"]), POINTS)
 
     def test_recording_without_a_folder_explains_what_to_do(self):
         self.app.setup.values["record_folder"] = ""
@@ -567,7 +567,7 @@ class RecordingTests(ViewTestCase):
         self.app.setup.values["record_folder"] = os.path.join(self.dir.name, "file-not-folder")
         open(self.app.setup.values["record_folder"], "w").close()      # a file, not a directory
         self.app.recording = True
-        with patch.object(waveform_export, "write_csv", side_effect=OSError("disk full")):
+        with patch.object(export, "write_csv", side_effect=OSError("disk full")):
             path = self.app.record_capture()
             # The write is on the worker, so the failure is known a moment later -
             # and it still stops the recording rather than going quiet. The frame is
