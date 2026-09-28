@@ -507,6 +507,10 @@ class ModernLabUI:
         for label, name, values, default, command in (
             ("Mode", "trigger_mode", self.scope.TRIGGER_MODES, "AUTO", self.set_trigger_mode),
             ("Source", "trigger_source", self.scope.TRIGGER_SOURCES, "CH1", self.set_trigger_source),
+            # The trigger's own coupling list, which is not the channel one: it
+            # adds the HF and LF noise-rejecting filters.
+            ("Coupling", "trigger_coupling", self.scope.TRIGGER_COUPLING, "DC",
+             self.set_trigger_coupling),
             ("Slope", "trigger_slope", self.scope.TRIGGER_SLOPES, "RISE", self.set_trigger_slope)):
             row = ttk.Frame(parent)
             row.pack(fill="x", pady=3)

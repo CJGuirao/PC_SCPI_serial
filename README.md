@@ -193,9 +193,18 @@ Learned on hardware, all of it expensive:
   acquire mode: `:AUTOSet`, `:AUTO`, `:AUTOSet EXECute`, `:SYSTem:AUTOSet`, `:KEY:AUTO`,
   `:TRIGger:AUTO`, `:AUTOSet ON`, `:RUN`, `:STOP`. Not one of them changed any of the five.
   The app's AUTO button therefore frames the time axis itself from the measured frequency
-  (see `software_autoset`) and then reads the instrument's settings back into the panel,
-  rather than pretending to press a key it cannot press. Pressing the physical AUTO key
-  still reaches the app: the framing watch notices the change within about a second.
+  (see `software_autoset`), then reads every setting the panel mirrors - trigger level,
+  sweep, coupling, source and slope, acquisition mode and depth, and each shown channel's
+  coupling, display and scale - back into its control. The readback is written with live
+  application switched off: these controls apply what they hold, so a value the instrument
+  has just given back must not be on its way to the instrument as a write. Pressing the
+  physical AUTO key still reaches the app: the framing watch notices the change within
+  about a second.
+* `:TRIGger:SINGle:EDGE:LEVel?` is momentarily unreliable right after a level write: an
+  HDS271 answered `4293V` there while the instrument was settling from its own AUTO, then
+  `-2.00V` steadily a moment later. That is the reason the readback exists rather than the
+  app trusting an echo of what it asked for - and the reason a level written into the live
+  trigger box must be guarded, or that `4293` becomes the next write.
 
 ### Downloading the screen capture
 

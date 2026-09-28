@@ -107,7 +107,8 @@ class PanelTestCase(unittest.TestCase):
         self.scope = Mock(spec=OWONScopeController)
         self.scope.is_connected = True
         for name in ("VOLTAGE_SCALES", "TIMEBASE_SCALES", "PROBE_ATTEN", "COUPLING_MODES",
-                     "ACQ_TYPES", "AVG_COUNTS", "MEMORY_DEPTHS", "TRIGGER_SLOPES"):
+                     "ACQ_TYPES", "AVG_COUNTS", "MEMORY_DEPTHS", "TRIGGER_SLOPES",
+                     "TRIGGER_MODES", "TRIGGER_SOURCES", "TRIGGER_COUPLING"):
             setattr(self.scope, name, getattr(OWONScopeController, name))
         # A spec'd Mock mocks the static helpers too, and the real code calls them.
         self.scope.parse_scale = OWONScopeController.parse_scale
@@ -765,6 +766,155 @@ class AutoFrameButtonTests(PanelTestCase):
         self.assertTrue(self.app.wait_for_instrument())
         self.assertFalse(self.app._busy)
         self.assertIn("transport went away", self.app.log_text.get("1.0", "end"))
+
+
+class AutoReadbackTests(PanelTestCase):
+    """AUTO leaves every control showing what the instrument is actually set to.
+
+    The framing readback alone left the trigger, acquisition and channel controls
+    showing whatever they held before AUTO - a panel that had stopped describing
+    the instrument it was talking to. The readback that fixes it is written with
+    live application off: a value the instrument has just given back must never
+    be re-sent as a write, or the control fights the instrument.
+    """
+
+    #: What the instrument answers, one entry per control under test. Values that
+    #: differ from the panel's defaults, so a control that was not written is
+    #: plainly visible as one.
+    REPLIES = {
+        "get_trigger_mode": "NORMal",
+        "get_trigger_coupling": "HF",
+        "get_trigger_source": "CH2",
+        "get_trigger_slope": "FALL",
+        "get_trigger_level_volts": 0.25,
+        "get_acquire_type": "PEAK",
+        "get_memory_depth": "8K",
+        "get_channel_scale": "500mv",
+        "get_channel_coupling": "AC",
+        "get_channel_display": "ON",
+    }
+
+    def instrument_answers(self, **overrides):
+        """Point every getter the readback uses at a setting of its own."""
+        for name, value in dict(self.REPLIES, **overrides).items():
+            getattr(self.scope, name).return_value = value
+        self.scope.get_channel_count.return_value = 1
+        return self.scope
+
+    def run_auto(self):
+        self.scope.auto_frame.return_value = {"applied": [], "notes": []}
+        self.app.action(self.app.auto_frame)
+        self.assertTrue(self.app.wait_for_instrument())
+
+    def test_every_control_follows_the_instrument_after_auto(self):
+        self.instrument_answers()
+        self.run_auto()
+        self.assertEqual("NORMal", self.app.trigger_mode.get())
+        self.assertEqual("HF", self.app.trigger_coupling.get())
+        self.assertEqual("CH2", self.app.trigger_source.get())
+        self.assertEqual("FALL", self.app.trigger_slope.get())
+        self.assertEqual("0.25", self.app.trigger_level.get())
+        self.assertEqual("PEAK", self.app.acq_type.get())
+        self.assertEqual("8K", self.app.mem_depth.get())
+        self.assertEqual("500mv", self.app.ch1_scale.get())
+        self.assertEqual("AC", self.app.ch1_coupling.get())
+        self.assertTrue(self.app.ch1_display.get())
+
+    def test_the_second_channel_is_read_back_too(self):
+        # Only the channels the panel is showing are read, so show two first.
+        self.instrument_answers()
+        self.app.show_channels(2)
+        self.scope.get_channel_scale.side_effect = lambda number: ("2v" if number == 2 else "500mv")
+        self.scope.get_channel_coupling.side_effect = lambda number: ("GND" if number == 2 else "AC")
+        self.run_auto()
+        self.assertEqual("500mv", self.app.ch1_scale.get())
+        self.assertEqual("2v", self.app.ch2_scale.get())
+        self.assertEqual("GND", self.app.ch2_coupling.get())
+
+    def test_a_column_that_is_not_on_screen_is_not_read(self):
+        # This firmware answers for more channels than it has, and a column that
+        # is hidden has no control to fill: reading it is round trips for nothing.
+        self.instrument_answers()
+        self.app.show_channels(1)
+        self.run_auto()
+        self.scope.get_channel_scale.assert_called_once_with(1)
+        self.scope.get_channel_coupling.assert_called_once_with(1)
+
+    def test_a_readback_writes_nothing_back_to_the_instrument(self):
+        # The whole point of the guard: these controls apply what they hold, so a
+        # value straight off the instrument would be sent back as a write.
+        self.instrument_answers()
+        self.run_auto()
+        for name in dir(self.scope):
+            if name.startswith("set_"):
+                getattr(self.scope, name).assert_not_called()
+        # And the readback did not quietly queue a live write to be fired later,
+        # which is the other way a control can turn a readback into a write: the
+        # guard is dropped by then, so the queued call would go straight out.
+        self.assertEqual({}, self.app._live_apply)
+
+    def test_a_readback_that_lands_in_the_live_trigger_box_writes_nothing(self):
+        # The trigger level is the live control of the set: it applies what it
+        # holds as soon as it settles, so this one is asserted on its own.
+        self.instrument_answers()
+        self.run_auto()
+        self.scope.set_edge_trigger_level.assert_not_called()
+        # Nor did the readback queue a live write of its own behind the guard.
+        self.app.apply_live("trigger_level", self.app.set_trigger_level)
+        self.scope.set_edge_trigger_level.assert_not_called()
+
+    def test_a_silent_node_leaves_its_control_alone(self):
+        # The HDS does not answer :CHn:DISPlay?, and an empty reply read as "off"
+        # would untick a channel that is plainly on screen.
+        self.instrument_answers(get_channel_display="")
+        self.app.ch1_display.set(True)
+        self.run_auto()
+        self.assertTrue(self.app.ch1_display.get())
+
+    def test_a_failing_readback_is_reported_and_changes_nothing(self):
+        self.scope.get_trigger_mode.side_effect = RuntimeError("bus went quiet")
+        self.scope.auto_frame.return_value = {"applied": [], "notes": []}
+        before = self.app.trigger_mode.get()
+        self.app.action(self.app.auto_frame)
+        self.assertTrue(self.app.wait_for_instrument())
+        self.assertEqual(before, self.app.trigger_mode.get())
+        self.scope.set_trigger_mode.assert_not_called()
+
+    def test_the_framing_readback_does_not_queue_a_write_either(self):
+        # The framing part of AUTO writes the confirmed level into the same live
+        # box as the readback, and it has to be under the guard too: this
+        # firmware's level readback ("4293V") landing in that box and going out
+        # as a write is what "the panel fights the instrument" is.
+        self.instrument_answers()
+        self.scope.auto_frame.return_value = {
+            "applied": ["timebase", "trigger level"], "timebase": "200us",
+            "trigger_level": "-2.04V", "trigger_level_readback": "4293V", "notes": []}
+        self.app.action(self.app.auto_frame)
+        self.assertTrue(self.app.wait_for_instrument())
+        self.assertEqual("0.25", self.app.trigger_level.get())
+        self.assertEqual({}, self.app._live_apply)
+        self.scope.set_edge_trigger_level.assert_not_called()
+
+    def test_a_readback_never_reaches_the_instrument_from_the_panel_loop(self):
+        # What the instrument reported and the panel now shows must survive the
+        # live loop: a write queued behind the readback would put the old value
+        # back on the instrument.
+        self.instrument_answers()
+        self.run_auto()
+        self.app.set_trigger_level()
+        self.assertTrue(self.app.wait_for_instrument())
+        self.scope.set_edge_trigger_level.assert_called_once_with(0.25)
+
+    def test_the_new_trigger_coupling_control_still_writes_when_the_user_picks(self):
+        # The readback must not have left the new control read-only in effect:
+        # a control that reports the instrument but cannot set it is the other
+        # half of the same problem.
+        self.instrument_answers()
+        self.run_auto()
+        self.app.trigger_coupling.set("LF")
+        self.app.set_trigger_coupling()
+        self.assertTrue(self.app.wait_for_instrument())
+        self.scope.set_edge_trigger_coupling.assert_called_once_with("LF")
 
 
 class MeasurementPanelTests(PanelTestCase):

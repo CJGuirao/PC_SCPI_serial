@@ -463,6 +463,20 @@ class App(ModernLabUI):
                             lambda scope, value=wanted: getattr(
                                 scope, "set_edge_trigger_slope", scope.set_trigger_slope)(value))
 
+    def set_trigger_coupling(self):
+        """The filter in front of the trigger: DC, AC, or a noise-rejecting HF/LF.
+
+        The readback writes this control too, and this family's trigger coupling
+        is its own list - DC, AC, HF, LF - not the channel coupling list it sits
+        beside on the front panel.
+        """
+        if self._is_connected():
+            wanted = self.trigger_coupling.get()
+            self.tell_scope("Trigger coupling -> %s" % wanted,
+                            lambda scope, value=wanted: getattr(
+                                scope, "set_edge_trigger_coupling",
+                                scope.set_trigger_coupling)(value))
+
     def set_trigger_level(self):
         if self._is_connected():
             value = self.trigger_level.get()
@@ -840,16 +854,29 @@ class App(ModernLabUI):
         # Follow only the changes the instrument confirmed. Writing an
         # unconfirmed readback into the live trigger box would have the panel
         # send that value straight back - and a readback like "4293V" is exactly
-        # the sort of thing this firmware returns.
-        if "timebase" in (report.get("applied") or []):
-            self.timebase_scale.set(report["timebase"])
-        if "trigger level" in (report.get("applied") or []):
-            level = self.scope.parse_scale(report.get("trigger_level_readback"))
-            if level is not None:
-                self.trigger_level.delete(0, tk.END)
-                self.trigger_level.insert(0, "%g" % level)
+        # the sort of thing this firmware returns. The guard is what makes that
+        # true rather than merely intended: these are the panel's own controls
+        # and they apply what they hold, so a value put in one here would be on
+        # its way to the instrument as a write the moment the guard lifts.
+        depth = getattr(self, "_sync_depth", 0)
+        self._sync_depth = depth + 1
+        try:
+            if "timebase" in (report.get("applied") or []):
+                self.timebase_scale.set(report["timebase"])
+            if "trigger level" in (report.get("applied") or []):
+                level = self.scope.parse_scale(report.get("trigger_level_readback"))
+                if level is not None:
+                    self.sync_entry(self.trigger_level, "%g" % level)
+        finally:
+            self._sync_depth = depth
         for note in report.get("notes") or []:
             self.log("AUTO: " + note)
+        # Then the rest of the panel: the framing above is only the half AUTO
+        # moves here, and a control left showing what it held before AUTO is a
+        # panel that has stopped describing the instrument. The instrument is
+        # asked what it is set to NOW, after the framing work, and the answer is
+        # written into the controls without a write going back.
+        self.read_back_panel_settings()
 
     # ZOOM +/- used to live here. They moved the axes directly, and the live loop
     # re-frames the plot from every capture, so a zoom either survived a fraction of
@@ -1824,6 +1851,193 @@ class App(ModernLabUI):
             deliver(list(rows or []) + self.capture_rows(), error)
 
         self.report_later("readout", self.read_trigger_rows, finish)
+
+    #: The controls an AUTO readback fills from read_trigger_rows, and the row
+    #: label that reader answers each one under. The dialog and the readback
+    #: therefore cannot drift apart in what they call the instrument's answers,
+    #: which is the whole reason for going through that reader rather than
+    #: querying the same nodes a second time.
+    PANEL_READBACK_ROWS = (
+        ("trigger_mode", "Trigger mode"),
+        ("trigger_source", "Trigger source"),
+        ("trigger_slope", "Trigger slope"),
+        ("trigger_coupling", "Trigger coupling"),
+        ("trigger_level", "Trigger level"),
+        ("acq_type", "Acquire type"),
+        ("mem_depth", "Memory depth"),
+    )
+
+    @staticmethod
+    def read_panel_settings(scope, channels=None):
+        """What the instrument is set to now, for every control AUTO leaves on screen.
+
+        Static, and touching no widget on purpose: this runs on the worker, which
+        is not the thread that made them. The trigger and acquisition values come
+        from read_trigger_rows - the same reader the readback dialog uses - so the
+        two agree by construction; only the per-channel fields it does not cover
+        for a second channel are read here, through the same controller getters it
+        calls for the first.
+
+        ``channels`` is the numbers the panel is showing; left out, the instrument
+        is asked. The panel passes them because this firmware over-reports its own
+        count - the HDS271 is a single-channel instrument that answers for four -
+        and reading controls that are not on screen is four round trips for
+        nothing.
+        """
+        rows = dict(App.read_trigger_rows(scope))
+        values = {name: rows.get(label) for name, label in App.PANEL_READBACK_ROWS}
+        if channels is None:
+            try:
+                count = int(scope.get_channel_count())
+            except Exception:                                          # noqa: BLE001
+                count = 1
+            channels = range(1, max(count, 1) + 1)
+        values["channels"] = []
+        for number in channels:
+            entry = {"number": number}
+            if number == 1:
+                # Already read, and read through the panel's own accessors, which
+                # apply this family's dialect and match the reply to the ladder.
+                entry["scale"] = rows.get("CH1 scale (label)")
+                entry["coupling"] = rows.get("CH1 coupling")
+            else:
+                for key, getter in (("scale", scope.get_channel_scale),
+                                    ("coupling", scope.get_channel_coupling)):
+                    try:
+                        entry[key] = getter(number)
+                    except Exception:                                  # noqa: BLE001
+                        entry[key] = None
+            try:
+                entry["display"] = scope.get_channel_display(number)
+            except Exception:                                          # noqa: BLE001
+                entry["display"] = None
+            values["channels"].append(entry)
+        return values
+
+    def apply_panel_settings(self, values, error=None):
+        """Put a whole-instrument readback into the controls, writing nothing back.
+
+        AUTO has just run the instrument, so what it answers now is what the panel
+        should be showing - and most of these are live controls, which apply what
+        they hold. Written with live application on, a readback would be sent
+        straight back as a write and the control would fight the instrument it
+        just read: the depth of the guard is what stops that, and it covers the
+        whole block so no value in it can leak out as a write.
+
+        Only what the instrument actually answered is written. A readback this
+        family does not implement (it is silent for :CHn:DISPlay?) leaves its
+        control alone rather than appearing to report a setting it never gave.
+        """
+        if error is not None:
+            self.log("AUTO: could not read the settings back: %s" % error, "WARNING")
+            return
+        values = values or {}
+        depth = getattr(self, "_sync_depth", 0)
+        self._sync_depth = depth + 1
+        try:
+            for name, fallback in (("trigger_mode", "TRIGGER_MODES"),
+                                   ("trigger_source", "TRIGGER_SOURCES"),
+                                   ("trigger_slope", "TRIGGER_SLOPES"),
+                                   ("trigger_coupling", "TRIGGER_COUPLING"),
+                                   ("acq_type", "ACQ_TYPES"),
+                                   ("mem_depth", "MEMORY_DEPTHS")):
+                widget = getattr(self, name, None)
+                # A selector's settings come back as text; anything else is a
+                # read that did not answer, and is left alone rather than shown.
+                reply = self.readback_token(values.get(name))
+                if widget is None or reply is None:
+                    continue
+                # Against the widget's own list, not the class constant: an HDS
+                # takes different acquisition modes and depths from the older
+                # dialect, and the widget is holding the ones it was built with.
+                choices = self.choice_values(widget) or list(getattr(self.scope, fallback, ()) or ())
+                if reply not in choices:
+                    match = OWONScopeController.match_choice(reply, choices)
+                    if match is None:
+                        continue
+                    reply = match
+                if widget.get() != reply:
+                    widget.set(reply)
+
+            # A level is a number, not a word, so it is the one value here that
+            # is not read as text: the reader has already parsed it to volts.
+            level = values.get("trigger_level")
+            if isinstance(level, (int, float)) and not isinstance(level, bool):
+                self.sync_entry(self.trigger_level, "%g" % level)
+
+            for channel in values.get("channels") or []:
+                number = channel.get("number")
+                scale = getattr(self, "ch%d_scale" % number, None)
+                reply = self.readback_token(channel.get("scale"))
+                if scale is not None and reply is not None:
+                    # Only a reply that IS one of the readings the control offers.
+                    # This family answers a dummy 0.0000e+00 for a node it does not
+                    # implement, and snapping that to the nearest rung would put a
+                    # real-looking 2mv on a channel that never answered.
+                    choices = self.choice_values(scale) or list(self.scope.VOLTAGE_SCALES)
+                    if reply not in choices:
+                        matched = OWONScopeController.match_scale(reply, choices)
+                        if matched is None:
+                            continue
+                        reply = matched
+                    if scale.get() != reply:
+                        scale.set(reply)
+
+                coupling = getattr(self, "ch%d_coupling" % number, None)
+                reply = self.readback_token(channel.get("coupling"))
+                if coupling is not None and reply in self.scope.COUPLING_MODES:
+                    if coupling.get() != reply:
+                        coupling.set(reply)
+
+                # Only a plain ON or OFF. This family is silent for :CHn:DISPlay?
+                # and answers a dummy number where it has no such setting, so a
+                # reply that is not one of those two words is an absence: read as
+                # "off" it would untick a channel that is plainly on screen.
+                display = getattr(self, "ch%d_display" % number, None)
+                reply = self.readback_token(channel.get("display"))
+                if display is not None and reply in ("ON", "OFF"):
+                    shown = reply == "ON"
+                    if bool(display.get()) != shown:
+                        display.set(shown)
+        finally:
+            self._sync_depth = depth
+        self.log("Panel shows the instrument's own settings")
+
+    @staticmethod
+    def readback_token(reply):
+        """A setting as the text a control holds, or None if it did not answer.
+
+        Text only, deliberately: every setting this readback fills is a word or a
+        ladder entry, and this family answers a dummy ``0.0000e+00`` for the nodes
+        it does not implement. Accepting that as a value would put a number where
+        a word belongs and, worse, look like an answer - so a non-text reply is
+        treated as the absence it is and leaves its control alone.
+        """
+        if not isinstance(reply, str):
+            return None
+        text = reply.strip()
+        return text or None
+
+    def read_back_panel_settings(self):
+        """Ask the instrument what it is set to, and fill the controls when it lands.
+
+        Every control the panel mirrors, not just the framing: after AUTO the
+        framing values were followed and the trigger, acquisition and channel
+        controls were left showing whatever they held before, which is a panel
+        that has stopped describing the instrument.
+
+        Only the channels the panel is showing are read: a column that is not on
+        screen has no control to fill, and this firmware answers for more channels
+        than it has.
+        """
+        if not self._is_connected():
+            return None
+        visible = [number for number, frame in getattr(self, "_channel_frames", {}).items()
+                   if frame.winfo_manager()]
+        return self.report_later(
+            "panel_readback",
+            lambda scope: self.read_panel_settings(scope, visible or None),
+            self.apply_panel_settings)
 
     def refresh_trigger_state(self):
         self.log("Trigger and acquisition state read back.")
