@@ -1169,19 +1169,22 @@ class App(ModernLabUI):
                 continue
             number = int(name[2:])
             # The panel's volts/div is the software's display scale. Left on Auto it
-            # follows what the capture DECODED to, never the volts/div the instrument
-            # reports: that label moves without the gain moving - a 10x change of it
-            # left the volts per code at ~0.145 V - so mirroring it would put the
-            # control 10x away from what the trace actually is.
+            # follows the REPORTED volts/div from the instrument header (the same number
+            # the hardware's own graticule uses), never true_volts_per_div (the decoded
+            # amplitude scale), which is the signal's span over the code range and
+            # diverges sharply for a small signal on a coarse scale.
+            reported = channel.get("volts_per_div")
             decoded = channel.get("true_volts_per_div")
             scale_widget = getattr(self, "ch%d_scale" % number, None)
-            if decoded and scale_widget is not None and self._display_scale_is_auto.get(number, True):
-                choices = self.choice_values(scale_widget) or list(OWONScopeController.VOLTAGE_SCALES)
-                scale = self.nearest_choice(decoded, choices)
-                if scale and scale_widget.get() != scale:
-                    scale_widget.set(scale)
-                    self.log("CH%d display scale auto: %s/div (the capture decodes to "
-                             "%.4g V/div at the tip)" % (number, scale, decoded))
+            if scale_widget is not None and self._display_scale_is_auto.get(number, True):
+                scale_source = reported or decoded
+                if scale_source:
+                    choices = self.choice_values(scale_widget) or list(OWONScopeController.VOLTAGE_SCALES)
+                    scale = self.nearest_choice(scale_source, choices)
+                    if scale and scale_widget.get() != scale:
+                        scale_widget.set(scale)
+                        self.log("CH%d display scale auto: %s/div (instrument reports "
+                                 "%.4g V/div)" % (number, scale, scale_source))
             probe_widget = getattr(self, "ch%d_probe" % number, None)
             if self._display_probe.get(number) is None and probe_widget is not None:
                 # The instrument ANNOUNCES 10X on this bench while a 1X probe feeds it,
@@ -1337,19 +1340,28 @@ class App(ModernLabUI):
         5 V, so a 25.6 Vpp signal is 5.1 divisions of the grid, at 10 V/div it is
         2.6, at 1 V/div it is 25.6. Nothing else is folded in - not the probe label,
         which does not scale this instrument's readings (a 1X-fed 25 V signal reads
-        25.6 V while it announces 10X), and not the volts/div it reports, which moves
-        without the gain moving.
+        25.6 V while it announces 10X).
 
-        Left on Auto it uses the scale the capture was DECODED at, snapped to a
-        setting the control offers, so the axis and the control name one number.
-        The decode gets its volts from the instrument's own readings, so the
-        amplitude does not move with this control - only the row and the height do.
+        On Auto the grid follows the REPORTED volts/div (what the front panel says
+        and what the instrument honours for display framing), so the software's grid
+        matches the hardware grid division for division. ``true_volts_per_div`` (the
+        calibrated amplitude scale) stays for the amplitude decode and is shown in
+        the axis label when it disagrees, but it is not the grid scale: for a 2.5 Vpp
+        signal at 500 mV/div the signal spans ~16 of the 256 codes, giving a decoded
+        amplitude scale of ~5 V/div - ten times the actual setting - which would shrink
+        the trace to a sliver while the hardware shows it 5 divisions tall.
         """
         chosen = self._display_scale.get(number)
         if chosen:
             value = WaveformData._scale_to_float(chosen)
             if value:
                 return value
+        # Auto: reported volts/div first (the hardware's framing setting), then the
+        # decoded amplitude scale as a fallback for the case where no header scale
+        # arrived yet (first frame before the header is complete).
+        reported = entry.get("volts_per_div")
+        if reported:
+            return float(reported)
         decoded = entry.get("true_volts_per_div")
         if decoded:
             widget = getattr(self, "ch%d_scale" % number, None)
@@ -1426,17 +1438,14 @@ class App(ModernLabUI):
             # reading taken against a sliding grid is worth nothing.
             spans.append((middle - half, middle + half))
             note = ""
-            claim = channel.get("volts_per_div")
             decoded = channel.get("true_volts_per_div")
-            # A real disagreement means a factor, not a few percent: the decode
-            # itself carries the spread of the calibration's span measurement, which
-            # is around ten percent, so a 5% threshold fired on its own noise.
-            if claim and decoded and abs(claim - decoded) > 0.25 * decoded:
-                note += " (the instrument's label claims %.4g V/div)" % claim
             probe_in_use = self._display_probe.get(number)
             if probe_in_use:
                 note += " %s" % probe_in_use
-            if decoded and abs(decoded - volts_per_div) > 0.1 * volts_per_div:
+            # Note the decoded amplitude scale when it differs meaningfully from
+            # the framing scale (e.g. a small signal on a coarse range) so the
+            # user knows the trace amplitude is decoded independently of the grid.
+            if decoded and abs(decoded - volts_per_div) > 0.25 * volts_per_div:
                 note += " (decoded %.4g V/div)" % decoded
             labels.append("%s %.4g V/div%s" % (
                 str(channel.get("name", "")).upper(), volts_per_div, note))

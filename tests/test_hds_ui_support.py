@@ -1200,21 +1200,25 @@ class FrontPanelSyncTests(PanelTestCase):
             self.assertAlmostEqual(OWONScopeController.parse_scale(selected), row, places=9)
             self.assertAlmostEqual(expected, rows, places=6)
 
-    def test_an_off_ladder_scale_snaps_and_the_axis_names_both(self):
-        # 20 V/div is not on the control (its ladder stops at 10v), so the row snaps
-        # to 10 V/div and the axis says what the capture actually decoded to. The
-        # amplitude is unaffected either way - rows x row is the signal at any scale.
+    def test_an_off_ladder_scale_snaps_the_widget_and_notes_the_reported_scale(self):
+        # 20 V/div is not on the control (its ladder stops at 10v), so the widget
+        # snaps to 10v. The axis shows the reported scale (20 V/div) because that is
+        # what the hardware grid uses. The decoded amplitude scale is the same here.
         self.scope.waveform.channels = [self.channel(20.0)]
         self.app.plot_waveform()
         self.assertEqual("10v", self.app.ch1_scale.get())
-        self.assertIn("20 V/div", self.app.ax.get_ylabel())      # what it decoded to
-        self.assertIn("10 V/div", self.app.ax.get_ylabel())      # what it drew with
+        self.assertIn("20", self.app.ax.get_ylabel())      # reported scale on axis
 
-    def test_a_reported_label_a_long_way_out_does_not_move_the_control(self):
+    def test_a_reported_label_sets_the_grid_and_true_scale_moves_the_widget(self):
+        # When volts_per_div (the hardware setting, 50 V/div) differs from
+        # true_volts_per_div (the decoded amplitude scale, 5 V/div), the grid uses
+        # the hardware setting (so divisions match the hardware screen), and the
+        # widget follows the reported hardware scale (nearest = 10v).
         self.scope.waveform.channels = [
             self.channel(50.0, true_volts_per_div=5.0)]
         self.app.plot_waveform()
-        self.assertEqual("5v", self.app.ch1_scale.get())
+        # The widget follows reported (50 V/div) → nearest on ladder = "10v"
+        self.assertEqual("10v", self.app.ch1_scale.get())
 
     def test_a_probe_set_on_the_instrument_reaches_the_control(self):
         self.scope.waveform.channels = [self.channel(0.2, attenuation="1X")]
@@ -1338,10 +1342,12 @@ class ControlReadbackTests(PanelTestCase):
         self.app.follow_instrument_position(1, dict(self.CHANNEL))
         self.assertAlmostEqual(2.5, self.app._display_offset[1], places=9)
 
-    def test_a_position_with_nothing_to_scale_is_ignored(self):
+    def test_a_position_with_no_decoded_scale_still_applies_if_reported_scale_known(self):
+        # true_volts_per_div=None but volts_per_div=5.0 is present:
+        # the position in divisions can still be converted to volts.
         raw = dict(self.CHANNEL, true_volts_per_div=None, vertical_offset_div=1.0)
         self.app.follow_instrument_position(1, raw)
-        self.assertAlmostEqual(0.0, self.app.display_offset(1), places=9)
+        self.assertAlmostEqual(5.0, self.app.display_offset(1), places=9)
 
 
 class AutoFramingTests(PanelTestCase):
