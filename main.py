@@ -28,7 +28,8 @@ class App(ModernLabUI):
 
     def __init__(self, root):
         self.root = root
-        self.root.title("OWON HDS SCPI Oscilloscope Control")
+        # The window title is owned by the panel (see show_scope_name): it names the
+        # attached instrument, and a second writer here can only make the two disagree.
         self.root.geometry("1440x900")
         self.root.minsize(1120, 760)
         self.root.configure(bg="#d5d4cf")

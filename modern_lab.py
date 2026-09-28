@@ -36,6 +36,11 @@ LIVE_GAP_MS = 120
 #: front-panel volts/div still shows up in about a second.
 LIVE_FRAMING_EVERY = 4
 
+#: What the big header label says while nothing is attached, and the fallback when a
+#: scope answers but does not name itself.
+UNCONNECTED_NAME = "Unconnected Scope"
+CONNECTED_NAME = "Connected Scope"
+
 #: Live frames between calibrations against the instrument's own readings. The
 #: measurement block is a few round trips, and it is what keeps the volts right
 #: when the header's volts/div label has drifted from the gain.
@@ -173,7 +178,9 @@ def transport_icon(kind, colour, size=16, scale=4):
 
 class ModernLabUI:
     def setup_gui(self):
-        self.root.title("Modern Lab • OWON Oscilloscope")
+        # Replaced as soon as the state is known; this is what the window says in the
+        # moment before anything has been read from, or connected to, the instrument.
+        self.root.title(UNCONNECTED_NAME)
         self.root.geometry("1440x900")
         self.root.minsize(1120, 760)
         self.root.configure(bg=PANEL)
@@ -234,8 +241,15 @@ class ModernLabUI:
 
         header = tk.Frame(self.root, bg=PANEL)
         header.pack(fill="x", padx=20, pady=(12, 8))
-        tk.Label(header, text="MODERN LAB", bg=PANEL, fg=INK,
-                 font=("Segoe UI", 19, "bold")).pack(side="left")
+        # The big label names what is on the other end of the cable, not the project.
+        # An operator's first question is whether a scope is attached and which one, and
+        # the answer has to come from the instrument: this app talks to an HDS271 and an
+        # HDS272, so the model is read from the unit's own *IDN? rather than assumed
+        # from the dialect it was opened with.
+        self.brand_label = tk.Label(header, text=UNCONNECTED_NAME, bg=PANEL, fg=INK,
+                                    font=("Segoe UI", 19, "bold"))
+        self.brand_label.pack(side="left")
+        self._brand_shown = UNCONNECTED_NAME
         tk.Label(header, text="  /  DIGITAL STORAGE OSCILLOSCOPE", bg=PANEL,
                  fg="#646c6c", font=("Segoe UI", 9)).pack(side="left", padx=8)
         self.conn_type = tk.StringVar(value="usb")
@@ -808,6 +822,30 @@ class ModernLabUI:
             self._state_icons[key] = image
         return image
 
+    def show_scope_name(self, *_args):
+        """Put the attached instrument's own model in the header.
+
+        The name comes from the instrument itself (``*IDN?`` -> ``HDS272``), never from
+        the dialect the app opened or the family it was built for, so a different unit on
+        the same bench names itself correctly. Nothing attached says so, and the label is
+        only touched when the text actually changes, since this runs on every live frame.
+        """
+        label = getattr(self, "brand_label", None)
+        if label is None:
+            return
+        if not getattr(self.scope, "is_connected", False):
+            text = UNCONNECTED_NAME
+        else:
+            model = str(getattr(self.scope, "model", "") or "").strip()
+            text = model.upper() or CONNECTED_NAME
+        if text != getattr(self, "_brand_shown", None):
+            label.configure(text=text)
+            # The window title says the same thing as the label, from this one place:
+            # an operator looking at the taskbar should see which scope is attached, and
+            # two titles that can disagree are one more thing to get wrong.
+            self.root.title(text)
+            self._brand_shown = text
+
     def update_state_indicator(self, *_args):
         """Say what the panel is doing: the mode, the rate, and a colour for it.
 
@@ -821,6 +859,10 @@ class ModernLabUI:
         path that changes what the panel is doing goes through that variable: the
         indicator follows it instead of each path remembering to say so.
         """
+        # The header names the instrument, and it is driven from the same place as the
+        # state: every path that connects, disconnects or fails to acquire already comes
+        # through here, so the name cannot drift out of step with the link.
+        self.show_scope_name()
         state = str(self.capture_state.get() or "") if hasattr(self, "capture_state") else ""
         live_on = bool(getattr(self, "auto_refresh_var", None) is not None
                        and self.auto_refresh_var.get())

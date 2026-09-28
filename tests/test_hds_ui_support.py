@@ -431,6 +431,77 @@ class LiveCaptureTests(PanelTestCase):
             reuse_header=False, calibrate=True)
 
 
+class ScopeNameTests(PanelTestCase):
+    """The big header label names the unit that is actually on the cable.
+
+    It used to read "MODERN LAB", which tells an operator nothing about whether a scope
+    is attached, let alone which one - and the answer has to come from the instrument,
+    because the same app is used with an HDS271 and an HDS272.
+    """
+
+    def label(self):
+        return self.app.brand_label.cget("text")
+
+    def test_it_starts_unconnected(self):
+        # Constructed before anything is attached, which is how the app opens.
+        self.assertEqual("Unconnected Scope", self.label())
+
+    def test_nothing_attached_says_so(self):
+        self.scope.is_connected = False
+        self.app.show_scope_name()
+        self.assertEqual("Unconnected Scope", self.label())
+
+    def test_a_connected_scope_names_itself(self):
+        self.scope.is_connected = True
+        self.scope.model = "HDS272"
+        self.app.show_scope_name()
+        self.assertEqual("HDS272", self.label())
+
+    def test_the_name_comes_from_the_instrument_not_the_requested_family(self):
+        # The app is built for the HDS dialect and asks no further; the model in the
+        # header is what the unit reports about itself, so a differently numbered scope
+        # is not mislabelled as the one this code was tested against.
+        self.scope.model = "HDS272"
+        self.app.show_scope_name()
+        self.assertEqual("HDS272", self.label())
+
+    def test_a_scope_that_does_not_name_itself_is_not_a_model(self):
+        self.scope.is_connected = True
+        self.scope.model = ""
+        self.app.show_scope_name()
+        self.assertEqual("Connected Scope", self.label())
+
+    def test_losing_the_link_goes_back_to_unconnected(self):
+        self.scope.model = "HDS272"
+        self.app.show_scope_name()
+        self.scope.is_connected = False
+        self.app.show_scope_name()
+        self.assertEqual("Unconnected Scope", self.label())
+
+    def test_the_window_title_says_the_same_thing(self):
+        # Same source, so the taskbar and the header cannot disagree about what is
+        # attached - and an operator reading either one is told the same thing.
+        self.scope.model = "HDS272"
+        self.app.show_scope_name()
+        self.assertEqual("HDS272", self.app.root.title())
+        self.scope.is_connected = False
+        self.app.show_scope_name()
+        self.assertEqual("Unconnected Scope", self.app.root.title())
+
+    def test_the_window_title_starts_unconnected(self):
+        self.assertEqual("Unconnected Scope", self.app.root.title())
+
+    def test_the_state_indicator_drives_it(self):
+        # Every path that connects or drops goes through the state indicator, so the
+        # name follows the link rather than each path remembering to update it.
+        self.scope.model = "HDS272"
+        self.app.update_state_indicator()
+        self.assertEqual("HDS272", self.label())
+        self.scope.is_connected = False
+        self.app.update_state_indicator()
+        self.assertEqual("Unconnected Scope", self.label())
+
+
 class ChoiceListTests(PanelTestCase):
     """The HDS series takes different modes and depths from the SDS dialect."""
 
