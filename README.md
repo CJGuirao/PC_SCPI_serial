@@ -187,6 +187,15 @@ Learned on hardware, all of it expensive:
 * `:ACQuire:DEPMem` accepts 4K or 8K.
 * The instrument's own Utility -> F4 -> USB menu setting does not change the USB descriptors;
   it reports `Oscilloscope MSC+HID` regardless of the selected mode.
+* **The front panel's AUTO key is not reachable over USB.** Nine candidate commands were
+  sent to an HDS271 (V1.3.0) and read back through the one framing value that is live on
+  this firmware - the timebase - plus the volts/div label, trigger level, trigger sweep and
+  acquire mode: `:AUTOSet`, `:AUTO`, `:AUTOSet EXECute`, `:SYSTem:AUTOSet`, `:KEY:AUTO`,
+  `:TRIGger:AUTO`, `:AUTOSet ON`, `:RUN`, `:STOP`. Not one of them changed any of the five.
+  The app's AUTO button therefore frames the time axis itself from the measured frequency
+  (see `software_autoset`) and then reads the instrument's settings back into the panel,
+  rather than pretending to press a key it cannot press. Pressing the physical AUTO key
+  still reaches the app: the framing watch notices the change within about a second.
 
 ### Downloading the screen capture
 
