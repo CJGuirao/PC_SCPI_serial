@@ -22,7 +22,7 @@ Dependencies point **one way, downwards**:
 
 Nothing under `modernlab/` imports `main`, `modern_lab` or `tkinter`. That is why the
 analysis, capture and storage parts can be tested with no window and no instrument —
-and why the whole suite (362 tests) runs headless.
+and why the whole suite (383 tests) runs headless.
 
 ## The parts
 
@@ -63,21 +63,59 @@ Each of these is a comment in the code and a test in `tests/`, rather than folkl
 - The **frame is part of the measurement**: centred on the capture, never finer than
   the decode, and an oversized trace is reported rather than silently chopped.
 
+## The controller, split by dialect
+
+`owon_controller.py` (1710 lines, one class carrying the SDS definitions and then a
+second block of HDS definitions under the same names) is now a nine-line shim:
+
+```python
+from modernlab.instrument.controller import OWONScopeController
+```
+
+so `main.py`, `console.py`, the tools and the tests keep importing it unchanged. The
+work sits in `modernlab/instrument/`:
+
+| module | owns |
+|---|---|
+| `dialect/sds.py` (`SdsDialect`) | the legacy SDS serial / LAN command set, its ladder and choice lists |
+| `dialect/hds.py` (`HdsDialect`) | the HDS channel and trigger nodes, the trigger tables, `probe_dialect`, and the reply-normalising helpers |
+| `measurements.py` (`Measurements`) | `parse_measurement` (qualifiers, picosecond time units), `get_measurements_numeric`, `verify_scale` |
+| `framing.py` (`FramingSettle`, `FramingWatch`) | the settle window, the capture-header cache and `framing_signature`, and the ratio-compared ladders |
+| `controller.py` (`OWONScopeController`) | the connection, the capture, and the one place that branches on family |
+
+`OWONScopeController` mixes those bases. The transports are untouched: `transport/`
+still owns the bytes, and the serial object, the LAN socket and the HID transport are
+still just `self.connection`.
+
+Two rules came out of the split, and both are the reason for it:
+
+- **A name belongs to one family.** Where the families differ (`set_channel_scale`,
+  `get_trigger_mode`, `download_waveform_data`, the four trigger helpers) the
+  controller checks `self.is_hds` and calls the base that owns the node form. Nothing
+  is defined twice in the inheritance graph, so nothing can shadow.
+- **No fallback may resolve to itself.** Before, an HDS method written *after* its SDS
+  namesake under the same name replaced it, so a fallback spelled
+  `OWONScopeController.query(self, ...)` reached the override and recursed to death on
+  every non-HDS instrument. The `legacy_*` aliases that papered over this are kept as
+  the documented way to reach the legacy implementation, but they are no longer what
+  keeps the SDS path alive.
+
+`measurements.py` and `framing.py` are mixins rather than functions so the controller
+stays one object for `io_worker.py` to own; they are written against `self.query` and
+the family's accessors, and neither imports the other.
+
 ## Still to split
 
-This pass moved the leaves. Three modules are still doing too much, in the order
-worth tackling:
+Two modules are still doing too much, in the order worth tackling:
 
-1. `owon_controller.py` (1710 lines) — transport, dialect, framing, measurements and
-   capture orchestration in one class. Target: `instrument/dialect/{hds,sds}.py`,
-   `instrument/measurements.py`, `instrument/framing.py`, `instrument/controller.py`.
-2. `modern_lab.py` (1911 lines) — panel, widgets and four dialogs. Target:
+1. `modern_lab.py` (1911 lines) — panel, widgets and four dialogs. Target:
    `ui/widgets/`, `ui/panels/`, `ui/dialogs/`, `ui/window.py`.
-3. `main.py` (2267 lines) — the application logic. Target: `app/application.py` plus
+2. `main.py` (2267 lines) — the application logic. Target: `app/application.py` plus
    one module per panel, with `main.py` reduced to a launcher.
 
 Until then each of those is still a single file, and this page should not pretend
-otherwise: what moved is the leaf layer, and the suite is the proof it moved intact.
+otherwise: what moved is the leaf layer and the controller, and the suite is the proof
+it moved intact.
 
 `console.py` (the SCPI console dialog) and `scope_gui.py` (an earlier, unused second
 GUI, now in `archive/`) are not part of this flow.
