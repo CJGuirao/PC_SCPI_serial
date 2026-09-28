@@ -145,6 +145,36 @@ class OWONScopeController(SdsDialect, HdsDialect, FramingSettle, FramingWatch, M
             return self.connect_usb(port)
         return False
 
+    def reconnect(self, serial=None):
+        """Close the current transport and reopen it without changing any settings.
+
+        Called by the auto-reconnect watchdog when live captures start failing.
+        Returns ``(success, idn_string)`` — the same shape ``open_transport``
+        returns so the caller can route both paths through one handler.
+
+        Only the HDS USB HID path is attempted here: that is the one transport
+        that can drop mid-session (the endpoint stalls, the firmware resets, or
+        the cable is briefly unplugged).  LAN and serial transports are not
+        retried automatically because their failure modes are different.
+        """
+        try:
+            self.disconnect()
+        except Exception as exc:
+            logging.warning("reconnect: disconnect raised %s", exc)
+        if not self.is_hds:
+            return False, ""
+        serial = serial or self.serial_number or None
+        opened = self.connect_usb_hid(serial=serial)
+        if not opened:
+            return False, ""
+        try:
+            result = self.identify_model() or {}
+            idn = result.get("idn", "")
+        except Exception as exc:
+            logging.warning("reconnect: identify_model raised %s", exc)
+            idn = ""
+        return True, idn
+
     def identify_model(self):
         """Read *IDN? and derive the HDS series (200 or 300)."""
         raw = (self.get_idn() or "").strip()

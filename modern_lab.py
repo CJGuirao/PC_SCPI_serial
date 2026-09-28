@@ -202,6 +202,8 @@ class ModernLabUI:
         self._deliveries = {}
         self._live_timer = None
         self._live_started = None
+        # Consecutive capture failures: reset on success, drives the reconnect watchdog.
+        self._capture_failures = 0
         self._live_period = None
         self._live_frames = 0
         self._dmm_tick = 0
@@ -1428,6 +1430,7 @@ class ModernLabUI:
             self.finish_close()
             return
         if success:
+            self._capture_failures = 0
             # The readbacks are asked for, not performed: they are three more USB
             # round trips, and the next frame must not queue behind them.
             self.refresh_cursors()
@@ -1454,12 +1457,14 @@ class ModernLabUI:
             self.status_var.set("Waveform acquired")
             self.report_auto_frame()
         else:
-            self.capture_state.set("ACQUISITION FAILED")
-            self.status_var.set(error or "Waveform download failed")
+            self._capture_failures += 1
             self.log(error or "Waveform download failed", "ERROR")
             if self.auto_refresh_var.get():
-                self.toggle_live()
-            self.capture_state.set("ACQUISITION FAILED")
+                self._attempt_reconnect(error)
+                return          # _attempt_reconnect drives the next state
+            else:
+                self.capture_state.set("ACQUISITION FAILED")
+                self.status_var.set(error or "Waveform download failed")
         if self.auto_refresh_var.get():
             # Reuse the header on most frames, and re-read it now and then so a
             # change made on the front panel still reaches the plot.
@@ -1474,6 +1479,95 @@ class ModernLabUI:
             reuse = (self._live_frames % LIVE_HEADER_EVERY) != 0
             self._live_timer = self.root.after(
                 self.live_gap_ms(), lambda: self.download_waveform(reuse_header=reuse))
+
+
+    # Maximum consecutive capture failures before the watchdog gives up and
+    # stops LIVE rather than looping forever.
+    _RECONNECT_GIVE_UP = 5
+
+    def _attempt_reconnect(self, last_error=None):
+        """Watchdog: try to recover a dropped USB connection, then resume LIVE.
+
+        Called from ``finish_capture`` when a live capture fails.  Drives the
+        state machine on the worker thread so the UI thread never blocks:
+
+        - 1st failure  -> endpoint halt-clear (cheap; repairs a stalled pipe)
+        - 2nd+ failure -> full disconnect + reconnect (repairs firmware reset /
+                          unplug-replug)
+        - >= _RECONNECT_GIVE_UP failures -> give up, stop LIVE, say why
+
+        Every branch posts a result back as kind="reconnect" so
+        ``on_instrument_result`` can update the panel on the Tk thread.
+        """
+        n = self._capture_failures
+        if n >= self._RECONNECT_GIVE_UP:
+            self.auto_refresh_var.set(False)
+            self.update_live_button()
+            self.capture_state.set("DISCONNECTED")
+            self.status_var.set("Reconnect failed after %d attempts \u2014 press Connect" % n)
+            self.log("Auto-reconnect gave up after %d consecutive failures. "
+                     "Press Connect to retry." % n)
+            return
+
+        if n == 1:
+            # First failure: try a cheap halt-clear before giving up the frame.
+            self.capture_state.set("RECOVERING\u2026")
+            self.status_var.set("Connection stalled \u2014 clearing endpoint\u2026")
+            def do_halt_clear(scope):
+                t = getattr(scope, "connection", None)
+                if t is not None and hasattr(t, "recover"):
+                    t.recover()
+                return scope.get_idn() or ""
+            self.report_later("reconnect", do_halt_clear, self._finish_reconnect)
+        else:
+            # Subsequent failures: full close + reopen.
+            self.capture_state.set("RECONNECTING\u2026")
+            self.status_var.set("Reconnecting\u2026 (attempt %d)" % n)
+            self.log("Capture failed %d time(s) in a row \u2014 attempting full reconnect." % n)
+            self.report_later("reconnect", lambda scope: scope.reconnect(),
+                              self._finish_reconnect)
+
+    def _finish_reconnect(self, answer, error=None):
+        """Handle the watchdog result on the Tk thread.
+
+        ``answer`` is either an idn string (halt-clear path) or a
+        ``(success, idn)`` tuple (full reconnect path).
+        """
+        if error is not None:
+            self.log("Reconnect raised: %s" % error, "ERROR")
+            self._capture_failures += 1
+            self._attempt_reconnect()
+            return
+
+        # Normalise: halt-clear returns a string, full reconnect a tuple.
+        if isinstance(answer, tuple):
+            opened, idn = answer
+        else:
+            opened = bool(answer)
+            idn = answer if isinstance(answer, str) else ""
+
+        if not opened:
+            self.log("Reconnect attempt %d failed." % self._capture_failures, "ERROR")
+            self._capture_failures += 1
+            self._attempt_reconnect()
+            return
+
+        # Back online.
+        self._capture_failures = 0
+        self.log("Reconnected: %s" % (idn or "instrument answered"))
+        self.capture_state.set("LIVE")
+        if idn:
+            self.device_info.set(idn)
+        # Invalidate the cached header so the first post-reconnect frame is
+        # parsed fresh \u2014 the instrument may have reset its settings.
+        try:
+            self.scope.invalidate_capture_header()
+        except Exception:
+            pass
+        # Resume the live loop from a clean slate.
+        self._live_period = None
+        self._live_frames = 0
+        self.download_waveform(reuse_header=False)
 
     def wait_for_instrument(self, timeout=5.0):
         """Run the worker's queue to completion, applying results as they land.

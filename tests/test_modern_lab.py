@@ -91,12 +91,18 @@ class FrontPanelTests(unittest.TestCase):
         self.assertEqual(self.app.ax.lines[0].get_color(), "#26d7e8")
         self.assertEqual(len(self.app.ax.lines[0].get_xdata()), 4)
 
-    def test_failed_live_capture_stops_refresh(self):
+    def test_failed_live_capture_starts_watchdog_not_stops_refresh(self):
+        # Old behaviour: a failed live capture stopped the live loop immediately.
+        # New behaviour: the watchdog takes over (auto_refresh_var stays True,
+        # _attempt_reconnect is called, live stops only after _RECONNECT_GIVE_UP
+        # consecutive failures).
         self.scope.download_waveform_data.return_value = False
         self.app.toggle_live()
         self.pump(lambda: not self.app._busy)
-        self.assertFalse(self.app.auto_refresh_var.get())
-        self.assertIsNone(self.app._live_timer)
+        # Live must still be on after one failure — the watchdog is retrying.
+        self.assertTrue(self.app.auto_refresh_var.get())
+        # The failure counter was bumped.
+        self.assertEqual(self.app._capture_failures, 1)
 
     def test_pause_during_inflight_capture(self):
         release = threading.Event()
