@@ -111,7 +111,7 @@ python -m venv .venv
 
 ## Tests
 
-362 tests, with no instrument attached (the suite mocks the transport). Clear the same
+383 tests, with no instrument attached (the suite mocks the transport). Clear the same
 two variables, or tkinter will not start and the GUI tests fail while the rest pass:
 
 ```bash
