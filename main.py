@@ -136,14 +136,20 @@ class App(ModernLabUI):
 
         USB finds the instrument by VID/PID, so there is nothing to type: the
         address box is removed and replaced by a plain hint. Choosing LAN brings
-        the address back in the same place, before the Connect button.
+        the address back in the same place, before the Connect button, plus a
+        note that the LAN/SDS path is legacy and not re-verified.
         """
-        for widget in (self.conn_address, self.conn_hint):
-            widget.pack_forget()
+        for widget in (self.conn_address, self.conn_hint,
+                       getattr(self, "conn_lan_note", None)):
+            if widget is not None:
+                widget.pack_forget()
         if self.conn_type.get().strip().lower() == "usb":
             self.conn_hint.pack(side="left", padx=5, before=self.connect_btn)
         else:
             self.conn_address.pack(side="left", padx=5, before=self.connect_btn)
+            lan_note = getattr(self, "conn_lan_note", None)
+            if lan_note is not None:
+                lan_note.pack(side="left", padx=(0, 5), before=self.connect_btn)
 
     def toggle_connection(self):
         if self._is_connected():

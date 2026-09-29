@@ -272,8 +272,13 @@ class ModernLabUI:
         # would be ignored.
         self.conn_address = ttk.Entry(transport, width=16)
         self.conn_address.insert(0, "10.1.1.131")
+        # The LAN path is the SDS-series dialect (SDS6202, verified before the refactor).
+        # It was not re-verified after the package split and is marked legacy in the README.
         self.conn_hint = tk.Label(transport, text="auto-detect", bg=PANEL, fg="#646c6c",
                                   font=("Segoe UI", 9))
+        self.conn_lan_note = tk.Label(transport,
+                                      text="LAN: SDS dialect (legacy, not re-verified)",
+                                      bg=PANEL, fg="#a08060", font=("Segoe UI", 8))
         self.connect_btn = ttk.Button(transport, text="Connect", command=lambda: self.action(self.toggle_connection))
         self.connect_btn.pack(side="left", padx=5)
         self.sync_connection_fields()

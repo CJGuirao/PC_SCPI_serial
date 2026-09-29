@@ -158,6 +158,9 @@ run headless.
   change the default MAC address. The USB path is verified on an HDS271; other models in
   both families have not been tried.
 - **The SCPI implementation in Owon is buggy**, with little or outdated documentation. The connection often times out and then I have to reconnect.
+- **LAN / SDS path**: the SDS6202 test predates the package refactor (see `doc/ARCHITECTURE.md`).
+  It has not been re-verified since; treat it as best-effort. The connect dialog shows a
+  "legacy, not re-verified" notice when LAN is selected.
 - LLM have been used to help build this app. Mostly Deepseek and Copilot.
 
 
