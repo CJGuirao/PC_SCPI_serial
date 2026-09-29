@@ -54,7 +54,7 @@ trustworthy and what a cursor pair would make exact. Two vertical markers give �
 and the level of each; two horizontal markers give ΔT, 1/ΔT, and the time of each.
 
 *Where:* the marker maths belongs in `waveform_data.py` beside the rest of the
-decode; the interaction in `modern_lab.py`; the state in `main.py`.
+decode; the interaction in `ui/panel.py`; the state in `app/application.py`.
 
 *Verify:* a synthetic capture (a known 25 Vpp, 1 kHz sine) — put a marker on the
 peak and the trough, assert 25.000 V and 1.0000 ms.

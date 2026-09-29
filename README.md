@@ -133,8 +133,14 @@ The code is split by domain. `doc/ARCHITECTURE.md` explains the rule between the
 layers and what is still to be split; briefly:
 
 ```
-main.py                    entry point: starts the window
-modern_lab.py              the front panel: layout, widgets, dialogs
+main.py                    launcher: opens the window and starts the event loop
+ui/                        the front panel: widgets, dialogs, ModernLabUI
+  widgets.py               Rotary, transport_icon, the palette
+  dialogs.py               capture table, SCPI console, readout, setup
+  panel.py                 ModernLabUI: layout, live loop, framing, cursors, views
+app/                       the application: App(ModernLabUI) and its instrument work
+  application.py           every instrument operation and the drawing
+modern_lab.py              compatibility shim: re-exports the names that used to live here
 owon_controller.py         SCPI controller (transport, dialect, framing, measurements)
 modernlab/                 everything that is not the UI
   instrument/transport/    bytes over a link: usb_hid.py
