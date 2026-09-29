@@ -151,11 +151,21 @@ class App(ModernLabUI):
         else:
             self.connect_scope()
 
+    # (model, firmware) pairs confirmed on real hardware.  Anything else gets an
+    # honest "unverified" notice so the user knows what level of testing applies.
+    _VERIFIED_MODELS = {
+        ("HDS271", "V1.3.0"),   # the bench unit all features were measured against
+    }
+
     def adopt_model(self):
         """Switch to the settings that belong to whatever just identified itself.
 
         Called after *IDN?, because the calibration, the probe and the bench
         reference describe an INSTRUMENT, and a bench can have more than one.
+
+        Logs an unverified-model notice when the connected unit is outside the
+        set of models that were actually tested, so the user knows what they
+        are working with.
         """
         model = ""
         try:
@@ -164,6 +174,25 @@ class App(ModernLabUI):
             model = ""
         if not model:
             return None
+        firmware = ""
+        try:
+            firmware = self.scope.firmware or ""
+        except Exception:
+            pass
+        # Check against the verified list.  Log once on connect so the notice
+        # is in the session log and in the status bar, but does not block use.
+        if (model, firmware) not in self._VERIFIED_MODELS:
+            self.log(
+                "Unverified model: %s firmware %s. "
+                "Every feature was measured on HDS271 V1.3.0; behaviour on other "
+                "models or firmware versions is untested. If something does not "
+                "work, please report it with the model and firmware version."
+                % (model or "unknown", firmware or "unknown"),
+                "WARNING"
+            )
+            self.status_var.set(
+                "Connected — %s %s (unverified model; see log)" % (model, firmware)
+            )
         before = self.setup.values.get("calibration_trim")
         self.setup.use_model(model)
         try:

@@ -6,6 +6,11 @@ what the instrument in front of it actually answers.
 Checked against **OWON HDS271, serial 25520161, firmware V1.3.0** (`*IDN?` →
 `OWON,HDS271,25520161,V1.3.0`), one node at a time, read-only.
 
+**HDS300-series and other HDS200 models:** the same command structure applies and the
+app will work, but no HDS300 unit was available for testing.  The app logs an
+"unverified model" notice on connect when the model/firmware is outside the confirmed
+list.  Everything in this table is specific to the HDS271 at V1.3.0.
+
 Reading the manual is not enough on this firmware, and the second half of this
 table is the reason: whole subsystems the manual documents for the series are
 absent from this instrument, and a node that is documented but unsupported

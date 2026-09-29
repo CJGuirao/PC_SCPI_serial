@@ -2,6 +2,8 @@
 
 This project provides a Python-based GUI for OWON HDS200/HDS300 and SDS series oscilloscopes, with SCPI control over LAN or USB. It includes a modern front panel for instrument control, waveform acquisition, measurement, and export.
 
+> **Verified hardware:** HDS271, firmware V1.3.0, USB HID. HDS300-series and other HDS200 models share the same command structure and will work, but have not been tested; the app logs an "unverified model" notice on connect so you know.
+
 ![OWON HDS Oscilloscope Control GUI](doc/screen.jpg)
 
 Verified against an **HDS271, firmware V1.3.0**, over USB HID. The LAN path and the
