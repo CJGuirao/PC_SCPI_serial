@@ -65,6 +65,7 @@ class OWONScopeController(SdsDialect, HdsDialect, FramingSettle, FramingWatch, M
         # readings. The header's volts/div is a label this firmware does not keep
         # in step with the gain, so this is what later captures decode with.
         self._calibrated_volts_per_code = None
+        self._calibrated_offset = None          # companion to _calibrated_volts_per_code
         # A write that changes the framing is not in the next capture yet: the
         # instrument needs a moment to re-acquire.  The window itself is
         # FramingSettle.FRAMING_SETTLE_SECONDS; see that class.
@@ -455,7 +456,8 @@ class OWONScopeController(SdsDialect, HdsDialect, FramingSettle, FramingWatch, M
             self.waveform = WaveformData()
             self.waveform.parse_hds_capture(
                 header, channel_payloads,
-                calibrated_volts_per_code=self._calibrated_volts_per_code)
+                calibrated_volts_per_code=self._calibrated_volts_per_code,
+                calibrated_offset=self._calibrated_offset)
             if not self.waveform.channels:
                 return False
             if calibrate:
@@ -567,8 +569,11 @@ class OWONScopeController(SdsDialect, HdsDialect, FramingSettle, FramingWatch, M
         if calibrated:
             for entry in self.waveform.channels:
                 slope = entry.get("voltage_per_point")
+                cal = entry.get("calibration", {})
+                offset = cal.get("offset_volts")
                 if slope:
                     self._calibrated_volts_per_code = slope
+                    self._calibrated_offset = offset   # keeps non-calibration frames stable
                     entry["true_volts_per_div"] = slope * HDS_CODES_PER_DIVISION
                     entry["volts_per_code_source"] = "instrument measurements"
                     break

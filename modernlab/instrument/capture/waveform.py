@@ -314,7 +314,8 @@ class WaveformData:
             logging.error("Error parsing channel %s: %s", channel_name, exc)
         return None
 
-    def parse_hds_capture(self, header, channel_payloads, calibrated_volts_per_code=None):
+    def parse_hds_capture(self, header, channel_payloads, calibrated_volts_per_code=None,
+                          calibrated_offset=None):
         """Parse an HDS200/HDS300 HEAD? document plus channel payloads.
 
         ``header`` is the JSON object from :DATA:WAVE:SCREen:HEAD? and
@@ -348,7 +349,8 @@ class WaveformData:
         self.channels = []
         for channel_name, payload in channel_payloads.items():
             channel = self._parse_hds_channel(header, channel_name, payload,
-                                              calibrated_volts_per_code)
+                                              calibrated_volts_per_code,
+                                              calibrated_offset)
             if channel:
                 self.channels.append(channel)
         return self.channels
@@ -423,7 +425,8 @@ class WaveformData:
         return unwrapped
 
     def _parse_hds_channel(self, header, channel_name, payload,
-                           calibrated_volts_per_code=None):
+                           calibrated_volts_per_code=None,
+                           calibrated_offset=None):
         # Wrapped codes are made continuous before anything else reads them: the
         # volts, the calibration's extremes and the plotted trace all depend on
         # samples being in order, and a signal across the 0/255 boundary is not.
@@ -495,10 +498,18 @@ class WaveformData:
 
         # The zero of the input.  The position control is a display shift: writing
         # one division of it moved the captured codes by 0, so the acquisition's
-        # zero is the sample midpoint, and a calibration refines it from the
-        # instrument's average.
-        zero_code = HDS_SAMPLE_MIDPOINT
-        volts = [round((code - zero_code) * volts_per_code, 6) for code in codes]
+        # zero is the sample midpoint by default.  When a calibration offset is
+        # available it is used instead: the calibration fitted (lo_code, Vmin) and
+        # (hi_code, Vmax) via a linear regression, producing a slope and an
+        # intercept (offset_volts).  The zero_code is recovered as -offset/slope.
+        # Using it here means non-calibration frames decode with the same zero the
+        # last calibration established, so the trace does not jump every 8 frames.
+        if calibrated_volts_per_code and calibrated_offset is not None:
+            zero_code = -calibrated_offset / calibrated_volts_per_code
+            volts = [round(calibrated_volts_per_code * code + calibrated_offset, 6) for code in codes]
+        else:
+            zero_code = HDS_SAMPLE_MIDPOINT
+            volts = [round((code - zero_code) * volts_per_code, 6) for code in codes]
 
         # Time axis: the capture spans the model's full horizontal width, and
         # the samples tile it evenly.
