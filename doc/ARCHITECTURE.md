@@ -116,17 +116,36 @@ ui/
   dialogs.py       CaptureTableDialog, ScpiConsoleDialog, ReadoutDialog, SetupDialog
   panel.py         ModernLabUI: layout, live loop, framing, cursors, views
 app/
-  application.py   App(ModernLabUI): every instrument operation and the drawing
+  __init__.py      re-exports App, so `from app import App` works
+  application.py   App(...mixins..., ModernLabUI): the core - state, clock, setup,
+                   run/stop, the result dispatcher (roughly 320 lines)
+  mixins/
+    connection.py  ConnectionMixin - connect, identify, adopt_model, disconnect
+    controls.py    ControlsMixin   - channel, timebase, trigger and acquire writes
+    dmm.py         DmmMixin        - the multimeter: function, mode, relative, reading
+    framing.py     FramingMixin    - what the grid shows and where the trace sits
+    views.py       ViewsMixin      - time, FFT, math, XY, cursors, what they measure
+    readback.py    ReadbackMixin   - panel state, instrument state, trigger rows
+    autoset.py     AutosetMixin    - auto range and software autoset
+    recording.py   RecordingMixin  - unattended recording to a folder
+    files.py       FilesMixin      - capture files, waveform export, SCPI console
 modern_lab.py      compatibility shim - re-exports the old names, see below
 ```
 
-`ui/` owns what you see and click and knows nothing of instruments; `app/application.py`
-owns the controller, the capture state and the drawing, and inherits `ModernLabUI` for
-the layout and the helpers (`self.log`, `self.ask_scope`, `self.report_later`,
-`self.status_var`, …). The inheritance is untouched by the move: `App` still has exactly
-one base, and nothing is defined twice in that graph.
+`ui/` owns what you see and click and knows nothing of instruments. `app/application.py`
+owns the state (`App.__init__` sets every attribute the mixins then use), the clock, the
+bench setup and the run/stop controls, and inherits the nine mixins plus `ModernLabUI`
+for the layout and the helpers (`self.log`, `self.ask_scope`, `self.report_later`,
+`self.status_var`, …).
 
-Two details are load-bearing rather than cosmetic:
+Three details are load-bearing rather than cosmetic:
+
+- **The mixins come first, `ModernLabUI` last.** `class App(ConnectionMixin, …, FilesMixin,
+  ModernLabUI)` puts the application's own methods ahead of the base panel in the MRO, so
+  where a name exists in both (`on_instrument_result`, `close_panel`) the application's
+  version wins and its `super()` call still reaches the panel's. No mixin defines
+  `__init__`: all state is initialised in `App.__init__`, and the mixins are written
+  against `self.X` because the class they are mixed into has set it up by then.
 
 - **`ASSETS` is anchored to the repository root**, not to the file it is written in.
   It used to be `Path(__file__).parent / "assets"`, which was correct while the constant
@@ -136,17 +155,26 @@ Two details are load-bearing rather than cosmetic:
   dialogs, the panel and the constants so existing imports keep working. It also
   re-exports `threading`, because a test patches `modern_lab.threading.Thread` to prove
   a worker that cannot start releases the panel, and `ui.panel` uses the same module
-  object, so the patch still reaches it. Likewise `app/application.py` resolves
-  `attached_scopes` through the `main` namespace at call time, because that name was a
-  `main` global before the split and patching `main.attached_scopes` has to keep working.
+  object, so the patch still reaches it. Likewise `app/application.py` and
+  `app/mixins/connection.py` each resolve `attached_scopes` through the `main` namespace
+  at call time, because that name was a `main` global before the split and patching
+  `main.attached_scopes` has to keep working. The two copies are the same function,
+  verbatim: `open_setup` in the core reads it for the setup dialog, `connect_scope` in
+  the connection mixin reads it for the USB device list, and neither may import `main`
+  at module scope (that would be a circular import).
 
 ## Still to split
 
 Nothing, for the moment. What was a 2645-line `main.py` and a 2081-line `modern_lab.py`
-is now the five UI modules above plus a 32-line launcher, and the suite (399 tests) runs
-headless against them. If `app/application.py` (2652 lines) is next, the natural seams
-are the ones already marked in it: the connection, the vertical framing, the readback
-and the plotting each stand alone.
+is now the five UI modules above plus a 32-line launcher, and what was a 2652-line
+`app/application.py` is now a roughly 320-line core with its instrument operations in
+nine mixins under `app/mixins/`. The suite (399 tests) runs headless against all of it.
+
+The split is a pure move: every method body is byte-identical to the one it replaced,
+the nine mixins carry no `__init__`, and the only rewrite was `read_panel_settings`
+addressing its two siblings (`read_trigger_rows`, `PANEL_READBACK_ROWS`) as
+`ReadbackMixin.…` instead of `App.…` — the same objects, since `App` inherits the mixin
+without override, and `App` is not importable from a mixin without a circular import.
 
 `console.py` (the SCPI console dialog) and `scope_gui.py` (an earlier, unused second
 GUI, now in `archive/`) are not part of this flow.
