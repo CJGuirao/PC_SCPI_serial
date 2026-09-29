@@ -574,10 +574,36 @@ class OWONScopeController(SdsDialect, HdsDialect, FramingSettle, FramingWatch, M
                     break
         return calibrated
 
+    def run(self, enabled=True):
+        """Start (RUN) or pause (STOP) the instrument's acquisition.
+
+        Verified on HDS271 V1.3.0: ``:RUNning RUN`` resumes triggering and
+        ``TRIGger:STATus?`` returns ``TRIG``; ``:RUNning STOP`` freezes the
+        display and the status returns ``STOP``.  Both forms produce no reply
+        text — confirmation is the status readback.
+        """
+        return self.send_command(":RUNning %s" % ("RUN" if enabled else "STOP"))
+
+    def get_run_state(self):
+        """Query the instrument's current run state.
+
+        Returns ``"RUN"`` or ``"STOP"`` when the node answers, or ``None`` when
+        the transport is not open or the instrument does not reply (non-HDS
+        paths where the node is unverified).
+
+        On HDS271 V1.3.0 ``:RUNning?`` answers ``RUN`` or ``STOP`` and agrees
+        with ``:TRIGger:STATus?``.
+        """
+        try:
+            reply = (self.query(":RUNning?") or "").strip().upper()
+        except Exception:
+            return None
+        if reply in ("RUN", "STOP"):
+            return reply
+        return None
+
     def get_capabilities(self):
         """Which optional capture paths this instrument actually answers.
-
-        Deep-memory and bitmap downloads are silent on some firmware, so probe
         them once instead of assuming: a command that never replies is reported
         as unavailable rather than guessed at.
         """

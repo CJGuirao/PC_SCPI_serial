@@ -59,6 +59,8 @@ answer that spelling at all; `:CH1:` is the one that works.
 | `:TRIGger:SINGle:COUPling` / `?` | yes | TRIGGER ▸ Coupling |
 | `:TRIGger:STATus?` | yes | logged on connect (`TRIG`) |
 | `:TRIGger:SINGle:SOURce?` | silent | — the program uses `:EDGE:SOURce?` |
+| `:RUNning` / `?` | yes | RUN/STOP button; write `:RUNning RUN` or `:RUNning STOP`, query returns `RUN` or `STOP`. Verified: `:TRIGger:STATus?` changed from `TRIG`→`STOP`→`TRIG` on two writes |
+| `:TRIGger:FORCe` and five other force-trigger candidates | **silent** | all six candidates probed; none changed `:TRIGger:STATus?`. Force trigger is front-panel only on this firmware |
 
 ## Acquisition
 

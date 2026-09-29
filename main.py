@@ -748,6 +748,48 @@ class App(ModernLabUI):
             self.scope.single_trigger()
             self.log("Single trigger armed")
 
+    def toggle_run_stop(self):
+        """Toggle the instrument between RUN and STOP.
+
+        Verified on HDS271 V1.3.0: ``:RUNning STOP`` freezes the display and
+        ``:TRIGger:STATus?`` returns ``STOP``; ``:RUNning RUN`` resumes
+        triggering and the status returns ``TRIG``.
+
+        The current state is read first so the button toggles correctly whether
+        the scope is running or stopped.  Both the state query and the write run
+        on the worker thread so the UI never blocks on USB.
+        """
+        if not self._is_connected():
+            return
+        def do_toggle(scope):
+            state = scope.get_run_state()
+            if state is None:
+                # Node not available on this firmware; log and do nothing.
+                return None
+            if state == "RUN":
+                scope.run(False)
+                return "STOP"
+            else:
+                scope.run(True)
+                return "RUN"
+        self.report_later("run_stop", do_toggle, self._finish_run_stop)
+
+    def _finish_run_stop(self, new_state, error=None):
+        """Apply the result of a RUN/STOP toggle on the Tk thread."""
+        if error is not None:
+            self.log("RUN/STOP failed: %s" % error, "ERROR")
+            return
+        if new_state is None:
+            self.log("RUN/STOP: :RUNning? node not available on this firmware", "WARNING")
+            return
+        self.log("Instrument %s" % new_state)
+        self.status_var.set("Instrument %s" % new_state)
+        # A STOP keeps the last live frame on screen; a RUN restarts the live loop
+        # if it was already running, so new frames appear without pressing LIVE again.
+        if new_state == "RUN" and self.auto_refresh_var.get():
+            self.download_waveform()
+
+
     def last_capture_amplitude(self):
         """The peak-to-peak of the last capture as the app shows it, in volts.
 
@@ -1832,8 +1874,13 @@ class App(ModernLabUI):
         # Two things the vendor's remote panel has buttons for, which this family
         # does not document a command for. Saying so beats a button that may do
         # nothing - and the console is right there for anyone who wants to try.
-        rows.append(("Run / Stop / Force", "no such command in the HDS200 set: run and stop on "
-                                           "the instrument, or try it in the SCPI console"))
+        rows.append(("Run / Stop", ":RUNning RUN / :RUNning STOP — verified HDS271 V1.3.0. "
+                                   "Use the RUN/STOP button in the toolbar."))
+        rows.append(("Force trigger", "no command found on HDS271 V1.3.0: all six candidates "
+                                      "(:TRIGger:FORCe, :TRIGger:SINGle:FORCe, :FORCetrig, "
+                                      ":TRIGger:FORCetrig, :TRIGger:FORC, :TRIG:FORC) were silent "
+                                      "and left :TRIGger:STATus? unchanged. "
+                                      "Use the instrument's front panel FORCE button."))
         rows.append(("Self correction", "on the instrument: UTILITY \u2192 Self Correct. It takes "
                                         "minutes and must not be interrupted."))
         return rows

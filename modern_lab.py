@@ -309,6 +309,7 @@ class ModernLabUI:
         # AUTO is the front panel's autoset: find the signal and frame it.
         self.key(acq, "AUTO", self.auto_frame, color="#9cd4e8").pack(side="left", expand=True, fill="x", padx=3)
         self.key(acq, "SINGLE", self.single_trigger).pack(side="left", expand=True, fill="x", padx=3)
+        self.key(acq, "RUN/STOP", self.toggle_run_stop, color="#c8e8a8").pack(side="left", expand=True, fill="x", padx=3)
         ttk.Label(controls, text="Knobs: drag • wheel • arrow keys",
                   foreground="#626968").grid(row=3, column=0, columnspan=2, pady=(9, 0))
 

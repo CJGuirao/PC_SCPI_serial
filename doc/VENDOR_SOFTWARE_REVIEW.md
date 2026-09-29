@@ -310,7 +310,7 @@ else is a unit test, or a reading of the protocol documents in `doc/`.
 | A10 Per-model settings | **done** | `scope_setup.per_model`, keyed by the name `*IDN?` reports and adopted on connect. A second scope no longer inherits the first one's trim, which is exactly how a plausible-looking factor gets applied to the wrong instrument. |
 | B1 Trigger panel | **done** | The TRIGGER read-out: what the instrument says it is doing beside what the capture was drawn from. |
 | B2 Channel / sample panels | **already present** | The front panel's channel and acquisition controls, each written and read back. |
-| B3 Autoset, run/stop, self-correct | **partly** | **Software autoset** frames the time axis from the measured frequency — the one framing write this interface can make. There is **no** run/stop/force command in the HDS200 set, so the panel says that, and the SCPI console will send one for anyone who wants to try. Self-correct is a front-panel action; the panel says where it is. |
+| B3 Autoset, run/stop, self-correct | **done** | **Software autoset** frames the time axis from the measured frequency. **RUN/STOP** button added: `:RUNning RUN` / `:RUNning STOP` verified on HDS271 V1.3.0 with `:TRIGger:STATus?` as the witness. **Force trigger**: all six candidates probed and silent — front-panel only. Self-correct is a front-panel action; the panel says where it is. |
 | B4 Multimeter modes | **done, and measured** | The picker offers only what the instrument answers. Probed live: VOLT/AMP (DC and AC) and REL answer; resistance, diode, continuity and capacitance are silent, so they are named as unavailable instead of offered as buttons that do nothing. |
 | B5 Network settings | **not applicable** | `doc/HDS200_Series_SCPI_Protocol.pdf` documents no LAN nodes for this family; the LAN transport in this app is for the SDS instruments. |
 | B6 Deep memory, stored files | **not available on this unit** | `datatype=SCREEN`, 300 points a frame. The review's finding stands: only the current page is ever exported, and CSV is the way out. |
@@ -323,11 +323,8 @@ else is a unit test, or a reading of the protocol documents in `doc/`.
 
 * **A9's theme details** — the palettes are ours (Dark, Light, Print), not a copy of
   the vendor's look.
-* **B3's run/stop and force trigger** — unverified, because the documented set has
-  no such node. If you want certainty, the console is the place to ask the
-  instrument; if it answers, a button is ten lines.
-* **Self-correct** and the instrument's own network settings are front-panel
-  actions, for the same reason: no node.
+* **Force trigger** — all six candidates probed on the HDS271, all silent. Front-panel only.
+* **Self-correct** and the instrument's own network settings are front-panel actions; no SCPI node.
 * **The "2 ms" question** from the earlier sessions is still open. The instrument
   measures 1.0000 ms on every capture, and its own Period/Frequency agree, so if
   the generator really is set to 2 ms then what reaches the scope is not 2 ms.
