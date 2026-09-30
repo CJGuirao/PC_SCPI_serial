@@ -550,20 +550,35 @@ class OWONScopeController(SdsDialect, HdsDialect, FramingSettle, FramingWatch, M
     def calibrate_capture(self, channel=None, pin_extremes=True):
         """Anchor the capture's volts axis on the instrument's own readings.
 
-        ``pin_extremes=True`` by default here: it is what fixes the slope from the
-        instrument's MIN/MAX/PKPK, and the slope is the part that needs fixing.
-        The header's volts/div is a label this firmware does not keep in step with
-        the gain - a 10x label change was measured leaving the volts per code at
-        ~0.145 V - while the instrument's own readings come from the real gain and
-        describe the input. Pinning the extremes onto those readings therefore
-        recovers the true scale, and the result is remembered so later captures
-        decode correctly without paying for the measurement block again.
+        ``pin_extremes=True`` (default): fits slope+offset from the
+        instrument's MIN and PKPK — only those two items are needed, so
+        this is a 2-query call (64 ms) rather than the 10-query full
+        measurement block (320 ms).
+
+        ``pin_extremes=False``: refines only the zero from AVERage.
+
+        The slope and offset are remembered on the controller so later
+        captures decode correctly without repeating the measurement reads.
         """
-        measurements = {}
-        for entry in self.waveform.channels:
-            name = str(entry.get("name", "CH1")).upper()
-            channel_number = name[2:] if name[:2].upper() == "CH" else name
-            measurements.update(self.get_measurements_numeric(channel_number))
+        if pin_extremes:
+            # Only Vmin and Vpp are consumed by calibrate_from_measurements
+            # when pin_extremes=True.  Fetching all 10 measurement items
+            # costs 320 ms; fetching just these two costs 64 ms.
+            measurements = {}
+            for entry in self.waveform.channels:
+                name = str(entry.get("name", "CH1")).upper()
+                ch = name[2:] if name[:2].upper() == "CH" else name
+                for label, node in (("Vmin", "MIN"), ("Vpp", "PKPK")):
+                    raw = self.query(":MEASUrement:CH%s:%s?" % (ch, node))
+                    value = self.parse_measurement(raw, node)
+                    if value is not None:
+                        measurements[label] = value
+        else:
+            measurements = {}
+            for entry in self.waveform.channels:
+                name = str(entry.get("name", "CH1")).upper()
+                ch = name[2:] if name[:2].upper() == "CH" else name
+                measurements.update(self.get_measurements_numeric(ch))
         calibrated = self.waveform.calibrate_from_measurements(
             measurements, channel=channel, pin_extremes=pin_extremes)
         if calibrated:

@@ -46,10 +46,11 @@ LIVE_FRAMING_EVERY = 8
 UNCONNECTED_NAME = "Unconnected Scope"
 CONNECTED_NAME = "Connected Scope"
 
-#: Live frames between calibrations against the instrument's own readings. The
-#: measurement block is a few round trips, and it is what keeps the volts right
-#: when the header's volts/div label has drifted from the gain.
-LIVE_CALIBRATE_EVERY = 8
+#: Live frames between calibrations against the instrument's own readings.
+#: calibrate_capture() now fetches only Vmin+Vpp (2 queries = 64 ms) instead
+#: of the full 10-item block (320 ms), so the per-frame amortised cost drops
+#: from ~42 ms to ~4 ms at this setting.  30 frames ≈ every 10-15 s at 2-3 fps.
+LIVE_CALIBRATE_EVERY = 30
 
 #: Re-read the capture header every this many live frames. The header is a
 #: measured 254-352 ms of each frame and only changes when a setting does, so it
