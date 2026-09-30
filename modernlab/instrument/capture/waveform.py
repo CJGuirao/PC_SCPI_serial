@@ -175,6 +175,9 @@ class WaveformData:
         self.datatype = ""
         self.run_status = ""
         self.sample_rate = ""
+        # Cached from the header so the UI does not need extra USB round trips.
+        self.trigger_level_v = None      # Trig.Items.Level, parsed to float volts
+        self.horizontal_position_s = None  # TIMEBASE.HOFFSET, in seconds
 
     @staticmethod
     def _scale_to_float(value):
@@ -345,6 +348,32 @@ class WaveformData:
         self.datatype = _ci(header, "datatype", "")
         self.run_status = _ci(header, "runstatus", "")
         self.sample_rate = _ci(sample, "samplerate", "")
+
+        # Parse trigger level and horizontal position from the header so the
+        # UI does not need separate USB queries for the cursor annotations.
+        # Header example: "Trig":{"Items":{"Level":"1.60V",...}}
+        trig_items = _ci(_ci(header, "trig", {}), "items", {})
+        trig_level_text = _ci(trig_items, "level", None)
+        self.trigger_level_v = None
+        if trig_level_text is not None:
+            raw = str(trig_level_text).strip()
+            scale = 1.0
+            # Strip trailing unit: "mV" before "V" so "100mV" works correctly.
+            if raw.upper().endswith("MV"):
+                raw, scale = raw[:-2], 0.001
+            elif raw.upper().endswith("V"):
+                raw = raw[:-1]
+            try:
+                self.trigger_level_v = float(raw) * scale
+            except (ValueError, TypeError):
+                self.trigger_level_v = None
+        # HOFFSET: currently 0 on this firmware with no offset applied; store
+        # only non-zero raw values (units unverified so left for the display layer).
+        hoffset_raw = _ci(timebase, "hoffset", None)
+        self.horizontal_position_s = (
+            float(hoffset_raw) if isinstance(hoffset_raw, (int, float)) and hoffset_raw != 0
+            else None
+        )
 
         self.channels = []
         for channel_name, payload in channel_payloads.items():

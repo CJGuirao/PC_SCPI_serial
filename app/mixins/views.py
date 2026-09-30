@@ -378,25 +378,38 @@ class ViewsMixin:
     def refresh_cursors(self):
         """Ask for the two values the plot annotates.
 
-        Two USB round trips, so they are read on the worker and applied by
-        :meth:`apply_cursor_readings`. Called at the end of every frame, which is
-        why they are coalesced: a readback that has been overtaken by a newer one
-        is worth nothing.
+        These used to be USB queries (2 × ~128 ms = 256 ms per frame).
+        Both values are now parsed from the capture header by parse_hds_capture
+        and stored on scope.waveform, so this is a free read of an already-received
+        value rather than a new USB round trip.  The worker call is kept so the
+        result still arrives through the same on_instrument_result path.
         """
         self.ask_scope("cursors", self.read_cursor_values, coalesce=True,
                        priority=PRIORITY_REFRESH)
 
     @staticmethod
     def read_cursor_values(scope):
-        """The two readings the plot annotates, each failing to None on its own."""
-        try:
-            level = scope.get_trigger_level_volts()
-        except Exception:
-            level = None
-        try:
-            position = scope.get_horizontal_position_seconds()
-        except Exception:
-            position = None
+        """The two readings the plot annotates, from the capture header cache.
+
+        The trigger level and horizontal position are parsed from the header
+        by parse_hds_capture() on every frame and stored on scope.waveform.
+        Reading them here costs zero USB round trips. If the cached values are
+        absent (e.g. first frame before the header is parsed, or a non-HDS
+        path), fall back to a live query so the display never goes blank.
+        """
+        waveform = getattr(scope, "waveform", None)
+        level = getattr(waveform, "trigger_level_v", None)
+        position = getattr(waveform, "horizontal_position_s", None)
+        # Fall back to live queries only when the header cache is empty.
+        if level is None:
+            try:
+                level = scope.get_trigger_level_volts()
+            except Exception:
+                level = None
+        # horizontal position: HOFFSET encoding is unverified on this firmware
+        # (raw integer ticks, not seconds), so only use the cached value when
+        # it is None (= zero offset, the common case). Don't fall back to the
+        # live query which also returns raw ticks in an unknown unit.
         return level, position
 
     def apply_cursor_readings(self, level, position):

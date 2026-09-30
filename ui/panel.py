@@ -31,15 +31,15 @@ from ui.dialogs import CaptureTableDialog, ReadoutDialog, ScpiConsoleDialog, Set
 
 #: Gap between the end of one live capture and the start of the next. A screen
 #: capture costs about 0.5 s on this instrument even with the header reused -
-#: the endpoint hands over 64 bytes every 32 ms - so live refresh is
-#: instrument-limited at roughly two frames per second, and this gap only gives
-#: the firmware a moment before the next frame is asked for.
-LIVE_GAP_MS = 120
+#: Default inter-frame gap in ms (0 = start the next capture immediately).
+#: live_gap_ms() reads the user's SETUP value; this constant is a fallback
+#: exported for callers that import it from modern_lab.
+LIVE_GAP_MS = 0
 
 #: Frames between framing watches in the live loop. Three text reads cost ~96 ms
-#: against the header's 254 ms, so this runs oftener than LIVE_HEADER_EVERY and a
-#: front-panel volts/div still shows up in about a second.
-LIVE_FRAMING_EVERY = 4
+#: against the header's 254 ms, so this runs less often than header reads.
+#: At 8 a front-panel volts/div change is visible within ~4 s.
+LIVE_FRAMING_EVERY = 8
 
 #: What the big header label says while nothing is attached, and the fallback when a
 #: scope answers but does not name itself.
