@@ -158,10 +158,24 @@ class FramingMixin:
 
         The instrument's position is shown in this view's own volts per division, so
         a row here means the same thing as a row there.
+
+        NOTE: On HDS271 V1.3.0 the header OFFSET field is unreliable - it reported
+        -55 divisions with no offset applied on the hardware screen (which would put
+        the trace completely off screen at 500 mV/div, yet the hardware showed it
+        correctly). The same firmware pattern as the volts/div SCALE label: the field
+        is cosmetic and does not reflect the acquisition state. We therefore only
+        apply the header's offset when it is within the physical screen range
+        (+-HDS_VERTICAL_DIVISIONS/2 = +-4 divisions). Values outside that range are
+        silently ignored - the user's own position control is still fully functional.
         """
         divisions = channel.get("vertical_offset_div")
         per_division = self.display_scale_value(number, channel)
         if not isinstance(divisions, (int, float)) or not per_division:
+            return
+        # Guard against the firmware's stale/garbage OFFSET values: the physical
+        # screen is 8 rows, so a real position fits within +-8 divisions (being
+        # generous). Anything beyond +-16 is certainly wrong and is ignored.
+        if abs(divisions) > 16:
             return
         instrument = divisions * per_division
         if instrument == self._instrument_position.get(number):

@@ -39,7 +39,7 @@ marked with what was measured, not with what the PDF says.
 | `:CH1:SCALe` / `?` | yes / **label only** | VERTICAL ▸ VOLTS/DIV. The readback follows the write, but the samples do not: one unchanged signal returned identical codes (113..149) at 200 mV, 500 mV, 1 V and 2 V/div, while the instrument's own Vpp reading scaled with the label. The write moves the label, and the zoom the instrument's screen applies to it — see "Display framing" below. |
 | `:CH1:COUPling` / `?` | yes | VERTICAL ▸ Coupling |
 | `:CH1:PROBe` / `?` | yes | VERTICAL ▸ Probe (X10 on this instrument) |
-| `:CH1:OFFSet` / `?` | yes | VERTICAL ▸ POSITION (V), live |
+| `:CH1:OFFSet` / `?` | **inert** / **unreliable** | VERTICAL ▸ POSITION (V). The write is accepted but the captured samples do not move (one division of position moved codes by 0). The header's `CHANNEL[].OFFSET` field also cannot be trusted: it reported **−55 divisions** (−27.5 V at 500 mV/div) while the hardware screen showed the trace correctly positioned with no offset applied. The app ignores header OFFSET values outside ±16 divisions |
 | `:CH1:DISPlay` / `?` | **inert** / silent | CH1 DISPLAY button (send-only) |
 | `:CH2:*` | silent | channel 2 does not exist here: the column is hidden and the probe is what decides |
 
