@@ -109,7 +109,8 @@ class ReadbackMixin:
             if acquire.get("type") and acquire["type"] in self.scope.ACQ_TYPES:
                 self.acq_type.set(acquire["type"])
             if acquire.get("average") and str(acquire["average"]) in self.scope.AVG_COUNTS:
-                self.acq_average.set(str(acquire["average"]))
+                if hasattr(self, "acq_average"):
+                    self.acq_average.set(str(acquire["average"]))
             if acquire.get("memory") and str(acquire["memory"]) in self.scope.MEMORY_DEPTHS:
                 self.mem_depth.set(str(acquire["memory"]))
             self.log("Settings refreshed")

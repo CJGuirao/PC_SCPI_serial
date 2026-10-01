@@ -630,7 +630,7 @@ class ModernLabUI:
             ("TABLE", self.show_table),
             ("SETUP", self.open_setup),
             ("OPEN", self.open_capture),
-            ("FIT", self.auto_scale), ("SAVE", self.save_waveform),
+            ("SAVE", self.save_waveform),
             ("UTILITY", lambda: self.show_drawer(3))):
             button = self.key(keys, label, command, color="#444c4e")
             button.configure(fg="#f1f3ed", activeforeground=INK, padx=4, font=("Segoe UI", 8, "bold"))
@@ -709,7 +709,9 @@ class ModernLabUI:
         for label, name, values, default, command in (
             ("Type", "acq_type", self.choices("acquire_mode_choices", "ACQ_TYPES"),
              "SAMPle", self.set_acquire_type),
-            ("Averages", "acq_average", self.scope.AVG_COUNTS, "4", self.set_acquire_average),
+            # Averages removed: HDS271 has no AVERage acquisition mode
+            # (SCPI_COVERAGE: "the manual lists no AVERage for this series").
+            # The SDS dialect does; it stays in the controller for SDS use.
             ("Memory", "mem_depth", self.choices("memory_depth_choices", "MEMORY_DEPTHS"),
              "4K", self.set_memory_depth)):
             column = ttk.Frame(acquire)
