@@ -190,16 +190,10 @@ class ModernLabUI:
         display = tk.Frame(chassis, bg="#303638", bd=7, relief="sunken")
         display.grid(row=0, column=0, sticky="nsew", padx=(10, 7), pady=10)
         self.build_display(display)
-        controls = tk.Frame(chassis, bg=PANEL, width=432)
+        controls = tk.Frame(chassis, bg=PANEL, width=460)
         controls.grid(row=0, column=1, sticky="ns", padx=(3, 10), pady=10)
         controls.grid_columnconfigure((0, 1), weight=1)
-        horizontal = self.group(controls, "HORIZONTAL", 0, 0)
-        trigger = self.group(controls, "TRIGGER", 0, 1)
-        self.build_horizontal(horizontal)
-        self.build_trigger(trigger)
-        vertical = self.group(controls, "VERTICAL", 1, 0, span=2)
-        self.build_channels(vertical)
-        acq = self.group(controls, "ACQUISITION", 2, 0, span=2)
+        acq = self.group(controls, "ACQUISITION", 0, 0, span=2)
         self.auto_refresh_var = tk.BooleanVar(value=False)
         # The button is the transport control and says what pressing it will do: a
         # pause glyph while the panel is capturing, a play glyph while it is not.
@@ -232,10 +226,38 @@ class ModernLabUI:
                 "AUTO — try the hardware AUTO key, then frame the time\n"
                 "axis from the measured signal frequency.\n"
                 "Reads back all controls from the instrument afterwards.")
-        ttk.Label(controls, text="Knobs: drag • wheel • arrow keys",
-                  foreground="#626968").grid(row=3, column=0, columnspan=2, pady=(9, 0))
+        horizontal = self.group(controls, "HORIZONTAL", 1, 0)
+        trigger = self.group(controls, "TRIGGER", 1, 1)
+        self.build_horizontal(horizontal)
+        self.build_trigger(trigger)
+        vertical = self.group(controls, "VERTICAL", 2, 0, span=2)
+        self.build_channels(vertical)
 
-        self.drawer = ttk.Notebook(display)
+        keys = tk.Frame(controls, bg="#303638")
+        keys.grid(row=3, column=0, columnspan=2, sticky="ew", padx=4, pady=(6, 2))
+        self._display_keys = keys
+        for label, command in (
+                ("MEASURE", lambda: self.show_drawer(0)),
+                ("ACQUIRE", lambda: self.show_drawer(1)),
+                ("ANALYSE", lambda: self.show_drawer(2)),
+                ("DECODE",  lambda: self.show_drawer(4)),
+                ("TABLE",   self.show_table),
+                ("SETUP",   self.open_setup),
+                ("OPEN",    self.open_capture),
+                ("SAVE",    self.save_waveform),
+                ("UTILITY", lambda: self.show_drawer(3))):
+            btn = self.key(keys, label, command, color="#444c4e")
+            btn.configure(fg="#f1f3ed", activeforeground=INK,
+                          padx=3, font=("Segoe UI", 8, "bold"))
+            btn.pack(side="left", fill="x", expand=True, padx=1, pady=2)
+
+        self._drawer_container = tk.Frame(controls, bg=PANEL)
+        self._drawer_container.grid(row=4, column=0, columnspan=2, sticky="ew", padx=4)
+
+        ttk.Label(controls, text="Knobs: drag • wheel • arrow keys",
+                  foreground="#626968").grid(row=5, column=0, columnspan=2, pady=(4, 0))
+
+        self.drawer = ttk.Notebook(self._drawer_container)
         self.build_drawer()
         footer = tk.Frame(self.root, bg=PANEL)
         footer.pack(side="bottom", fill="x", padx=18, pady=(0, 8))
@@ -621,25 +643,6 @@ class ModernLabUI:
         tk.Label(parent, textvariable=self.cursor_text, bg=SCREEN, fg="#9cf0c9",
                  font=("Consolas", 9), anchor="w").pack(fill="x", padx=12, pady=(4, 0))
 
-        keys = tk.Frame(parent, bg="#303638")
-        self._display_keys = keys
-        keys.pack(fill="x", pady=(5, 0))
-        # ZOOM +/- were removed: they moved the axes while live acquisition was
-        # re-drawing them from the capture, so the view jumped back and forth.
-        # Framing is the volts/div and time/div controls' job in the meantime.
-        for label, command in (
-            ("MEASURE", lambda: self.show_drawer(0)),
-            ("ACQUIRE", lambda: self.show_drawer(1)),
-            ("ANALYSE", lambda: self.show_drawer(2)),
-            ("DECODE",  lambda: self.show_drawer(4)),
-            ("TABLE", self.show_table),
-            ("SETUP", self.open_setup),
-            ("OPEN", self.open_capture),
-            ("SAVE", self.save_waveform),
-            ("UTILITY", lambda: self.show_drawer(3))):
-            button = self.key(keys, label, command, color="#444c4e")
-            button.configure(fg="#f1f3ed", activeforeground=INK, padx=4, font=("Segoe UI", 8, "bold"))
-            button.pack(side="left", fill="x", expand=True, padx=2, pady=2)
 
     def style_plot(self, empty=False):
         self.ax.set_facecolor(SCREEN)
@@ -812,12 +815,13 @@ class ModernLabUI:
         if self._drawer_open and self.drawer.index("current") == index:
             self.hide_drawer()
             return
-        self.drawer.pack(fill="x", padx=4, pady=4, before=self._display_keys)
+        self.drawer.grid(row=0, column=0, sticky="ew")
+        self._drawer_container.grid_columnconfigure(0, weight=1)
         self.drawer.select(index)
         self._drawer_open = True
 
     def hide_drawer(self):
-        self.drawer.pack_forget()
+        self.drawer.grid_forget()
         self._drawer_open = False
 
     def single_trigger(self):
