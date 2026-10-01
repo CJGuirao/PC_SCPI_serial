@@ -123,6 +123,21 @@ class App(ConnectionMixin, ControlsMixin, DmmMixin, FramingMixin, ViewsMixin, Re
         #: Unattended recording: every capture written to a folder, untouched.
         self.recording = False
         self._records = 0
+        # --- Software averaging ---
+        #: Number of frames to average (1 = off). Controlled from the ANALYSE panel.
+        self._avg_depth = 1
+        #: Ring buffer of recent decoded waveform arrays, one list per channel name.
+        self._avg_buf = {}          # {channel_name: deque of np.ndarray}
+        # --- Reference trace overlay ---
+        #: Saved (times_array, volts_array, label_str) or None when cleared.
+        self._ref_trace = None
+        # --- Zoom ---
+        #: (x_lo, x_hi) in data coords, or None when at full scale.
+        self._zoom_xlim = None
+        #: (y_lo, y_hi) in data coords, or None when at full scale.
+        self._zoom_ylim = None
+        #: matplotlib RectangleSelector instance for drag-to-zoom.
+        self._zoom_selector = None
 
         self.setup_gui()
         self.capture_state.set("NO ACQUISITION")

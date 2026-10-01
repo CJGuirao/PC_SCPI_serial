@@ -578,6 +578,7 @@ class ModernLabUI:
         self.canvas.get_tk_widget().configure(width=400, height=300, highlightthickness=0)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
         self._connect_plot_events()
+        self._install_zoom_selector()
         readouts = tk.Frame(parent, bg=SCREEN)
         readouts.pack(fill="x", pady=(0, 8))
         self._readout_widgets = {}
@@ -1015,6 +1016,38 @@ class ModernLabUI:
         self.canvas.mpl_connect("motion_notify_event", self._on_plot_motion)
         self.canvas.mpl_connect("button_release_event", self._on_plot_release)
 
+    def _install_zoom_selector(self):
+        """Drag-to-zoom: right-click-drag on the time plot to select a region."""
+        try:
+            from matplotlib.widgets import RectangleSelector
+        except ImportError:
+            return
+        self._zoom_selector = RectangleSelector(
+            self.ax, self._on_zoom_select,
+            useblit=True, button=[3],
+            minspanx=5, minspany=5, spancoords="pixels", interactive=False,
+            props={"edgecolor": "#7bd6ff", "facecolor": "#7bd6ff",
+                   "alpha": 0.15, "linewidth": 1.5, "linestyle": "--"},
+        )
+        self._zoom_selector.set_active(True)
+
+    def _on_zoom_select(self, eclick, erelease):
+        """Apply zoom when the user releases a right-drag rectangle."""
+        if getattr(self, "_view", "time") != "time":
+            return
+        if eclick.xdata is None or erelease.xdata is None:
+            return
+        x0, x1 = sorted((eclick.xdata, erelease.xdata))
+        y0, y1 = sorted((eclick.ydata, erelease.ydata))
+        if abs(x1 - x0) < 1e-30:
+            return
+        self._zoom_xlim = (x0, x1)
+        self._zoom_ylim = (y0, y1)
+        self._plot_frame_key = None
+        self.plot_waveform()
+        if hasattr(self, "_zoom_btn"):
+            self._zoom_btn.configure(state="normal")
+
     def set_cursor_target(self, which):
         """Choose which marker a click on the plot will place."""
         if which in self._cursors:
@@ -1222,6 +1255,46 @@ class ModernLabUI:
         self.record_label = tk.StringVar(value="idle")
         tk.Label(row, textvariable=self.record_label, bg=PANEL, fg="#7a6a2e",
                  font=("Segoe UI", 8)).pack(side="left", padx=6)
+
+        # ── AVERAGING ────────────────────────────────────────────────
+        avg_frame = ttk.Frame(parent, padding=(8, 4, 8, 4))
+        avg_frame.pack(side="left", anchor="n", padx=6)
+        ttk.Label(avg_frame, text="AVERAGING", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        ttk.Label(avg_frame, text="Frames", font=("Segoe UI", 8)).pack(anchor="w", pady=(4, 0))
+        self.avg_depth_var = tk.StringVar(value="1")
+        avg_box = ttk.Combobox(avg_frame, textvariable=self.avg_depth_var,
+                               values=("1", "2", "4", "8", "16", "32", "64"),
+                               state="readonly", width=5)
+        avg_box.pack(anchor="w", pady=2)
+        avg_box.bind("<<ComboboxSelected>>",
+                     lambda e: self.set_avg_depth(int(self.avg_depth_var.get())))
+        ttk.Label(avg_frame, text="1 = off", font=("Segoe UI", 7),
+                  foreground="#8fa3a3").pack(anchor="w")
+        self.key(avg_frame, "CLEAR AVG", self.clear_avg_buf,
+                 color="#444c4e").pack(fill="x", pady=(4, 0))
+
+        # ── REFERENCE TRACE ──────────────────────────────────────────
+        ref_frame = ttk.Frame(parent, padding=(8, 4, 8, 4))
+        ref_frame.pack(side="left", anchor="n", padx=6)
+        ttk.Label(ref_frame, text="REFERENCE", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        self.key(ref_frame, "SAVE REF", self.save_ref_trace,
+                 color="#9cdc9c").pack(fill="x", pady=(4, 1))
+        self.key(ref_frame, "CLEAR REF", self.clear_ref_trace,
+                 color="#444c4e").pack(fill="x", pady=1)
+        self.ref_label = tk.StringVar(value="none")
+        tk.Label(ref_frame, textvariable=self.ref_label, bg=PANEL, fg="#8fa3a3",
+                 font=("Segoe UI", 7), wraplength=80).pack(anchor="w", pady=(2, 0))
+
+        # ── ZOOM ─────────────────────────────────────────────────────
+        zoom_frame = ttk.Frame(parent, padding=(8, 4, 8, 4))
+        zoom_frame.pack(side="left", anchor="n", padx=6)
+        ttk.Label(zoom_frame, text="ZOOM", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        ttk.Label(zoom_frame, text="Right-drag on\nplot to zoom",
+                  font=("Segoe UI", 7), foreground="#8fa3a3",
+                  justify="left").pack(anchor="w", pady=(2, 4))
+        self._zoom_btn = self.key(zoom_frame, "ZOOM OUT", self.zoom_out, color="#444c4e")
+        self._zoom_btn.pack(fill="x")
+        self._zoom_btn.configure(state="disabled")
 
         # The spectrum and maths options are read back by the app when it draws.
         self.spectrum_text = self.text_area(parent)

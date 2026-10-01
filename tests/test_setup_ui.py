@@ -57,19 +57,25 @@ class PanelTestCase(unittest.TestCase):
             pass
 
 
-class ZoomRemovedTests(PanelTestCase):
-    """The zoom keys are gone while live framing owns the view."""
+class ZoomTests(PanelTestCase):
+    """Zoom lives in the ANALYSE drawer, not the display key strip."""
 
-    def test_there_is_no_zoom_key(self):
+    def test_there_is_no_zoom_key_in_the_display_strip(self):
         labels = [child.cget("text") for child in self.app._display_keys.winfo_children()]
         self.assertTrue(labels)
         for label in labels:
             self.assertNotIn("ZOOM", label.upper())
         self.assertIn("SETUP", " ".join(labels))
 
-    def test_the_zoom_methods_are_gone_too(self):
-        self.assertFalse(hasattr(self.app, "zoom_in"))
-        self.assertFalse(hasattr(self.app, "zoom_out"))
+    def test_zoom_out_method_exists(self):
+        self.assertTrue(hasattr(self.app, "zoom_out"))
+
+    def test_zoom_out_clears_zoom_state(self):
+        self.app._zoom_xlim = (0.1, 0.5)
+        self.app._zoom_ylim = (-1.0, 1.0)
+        self.app.zoom_out()
+        self.assertIsNone(self.app._zoom_xlim)
+        self.assertIsNone(self.app._zoom_ylim)
 
 
 class SetupDialogTests(PanelTestCase):

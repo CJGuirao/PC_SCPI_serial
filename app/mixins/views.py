@@ -336,17 +336,24 @@ class ViewsMixin:
             y = np.asarray(channel.get("waveform", []), dtype=float)
             if y.size == 0:
                 continue
-            # The amplitudes are the instrument's own volts, already at the BNC:
-            # nothing is folded in here. Keeping the call makes the one place a
-            # convention could change explicit rather than scattered through the
-            # drawing code.
             number = self.channel_number(channel)
             if number:
                 y = y * self.display_ratio(number, channel)
-                # The panel's vertical position, in the same volts the axis is
-                # drawn in, so the trace moves and the grid does not.
                 y = y + self.display_offset(number)
             x = np.arange(y.size, dtype=float) * float(channel.get("point_interval", 1.0) or 1.0) * factor
+
+            # Software averaging: blend with the ring buffer if depth > 1.
+            depth = getattr(self, "_avg_depth", 1)
+            if depth > 1:
+                from collections import deque
+                buf = getattr(self, "_avg_buf", {})
+                if name not in buf:
+                    buf[name] = deque(maxlen=depth)
+                buf[name].append(y.copy())
+                self._avg_buf = buf
+                if len(buf[name]) > 1:
+                    y = np.mean(np.stack(list(buf[name])), axis=0)
+
             per_channel_xy.append((name, color, x, y))
             plotted = True
             drawn_low = float(np.min(y)) if drawn_low is None else min(drawn_low, float(np.min(y)))
@@ -400,6 +407,10 @@ class ViewsMixin:
             channel_names,
             display_offsets,
             face.get("name", ""),
+            getattr(self, "_zoom_xlim", None),
+            getattr(self, "_zoom_ylim", None),
+            getattr(self, "_ref_trace", None) is not None,
+            getattr(self, "_avg_depth", 1),
         )
         fast_path = (
             plotted
@@ -437,8 +448,16 @@ class ViewsMixin:
                     line, = self.ax.plot(x, y, color=color, linewidth=1.4)
                     self._dynamic_artists.append(line)
                 self.show_graticule(framing, window, unit, factor)
+                # Apply zoom limits if the user has dragged a rectangle.
+                xlim = getattr(self, "_zoom_xlim", None)
+                ylim = getattr(self, "_zoom_ylim", None)
+                if xlim:
+                    self.ax.set_xlim(*xlim)
+                if ylim:
+                    self.ax.set_ylim(*ylim)
             self._plot_frame_key = frame_key
 
+        self.draw_ref_trace()
         self.draw_reference_lines(plotted)
         self.draw_zero_markers(references if plotted else [])
         self.canvas.draw_idle()
@@ -581,3 +600,124 @@ class ViewsMixin:
                              annotation_clip=False)
             self._zero_mark_artists.extend([line, annot])
             self._zero_marks.append({"name": name, "offset": offset, "label": label})
+
+    # ------------------------------------------------------------------
+    # Software averaging
+    def set_avg_depth(self, depth):
+        """Set how many frames to average. 1 = off."""
+        from collections import deque
+        self._avg_depth = max(1, int(depth))
+        # Clear the buffer whenever depth changes so stale frames don't bleed in.
+        self._avg_buf = {}
+        self.log("Averaging: %d frame%s" % (self._avg_depth,
+                                             "" if self._avg_depth == 1 else "s"))
+
+    def clear_avg_buf(self):
+        """Discard the averaging ring buffer (e.g. after a settings change)."""
+        self._avg_buf = {}
+        self.log("Averaging buffer cleared.")
+
+    def averaged_channel_xy(self, channels, factor):
+        """Return per_channel_xy with the waveform arrays averaged over the ring buffer.
+
+        When _avg_depth == 1 (off) this is a no-op and returns the live arrays
+        unchanged.  Otherwise it accumulates the last N arrays per channel name
+        and returns the element-wise mean, which suppresses uncorrelated noise by
+        sqrt(N) exactly as hardware averaging would.
+        """
+        from collections import deque
+        depth = getattr(self, "_avg_depth", 1)
+        buf = getattr(self, "_avg_buf", {})
+        result = []
+        for channel in channels:
+            name = str(channel.get("name", "CH1")).upper()
+            y = np.asarray(channel.get("waveform", []), dtype=float)
+            if y.size == 0:
+                result.append((name, channel))
+                continue
+            number = self.channel_number(channel)
+            if number:
+                y = y * self.display_ratio(number, channel)
+                y = y + self.display_offset(number)
+            x = np.arange(y.size, dtype=float) * float(
+                channel.get("point_interval", 1.0) or 1.0) * factor
+            if depth > 1:
+                if name not in buf:
+                    buf[name] = deque(maxlen=depth)
+                buf[name].append(y)
+                if len(buf[name]) > 1:
+                    y = np.mean(np.stack(list(buf[name])), axis=0)
+            result.append((name, x, y))
+        self._avg_buf = buf
+        return result
+
+    # ------------------------------------------------------------------
+    # Reference trace overlay
+    def save_ref_trace(self):
+        """Save the current live trace as the reference overlay."""
+        channels = self.capture_channels()
+        for channel in channels:
+            y = np.asarray(channel.get("waveform", []), dtype=float)
+            if y.size == 0:
+                continue
+            name = str(channel.get("name", "CH1")).upper()
+            number = self.channel_number(channel)
+            if number:
+                y = y * self.display_ratio(number, channel)
+                y = y + self.display_offset(number)
+            factor, _unit, _span = 1.0, "s", None
+            interval = float(channel.get("point_interval", 0) or 0)
+            if interval and y.size:
+                factor, _unit = self.time_axis_units(interval * (y.size - 1))
+            x = np.arange(y.size, dtype=float) * interval * factor
+            label = "%s  %s" % (name, analysis.format_volts(float(np.max(y) - np.min(y))) + " pk-pk")
+            self._ref_trace = (x, y, label)
+            if hasattr(self, "ref_label"):
+                self.ref_label.set(label)
+            self.log("Reference saved: %s" % label)
+            # Only save the first channel as reference.
+            break
+        self._plot_frame_key = None
+        self.plot_waveform()
+
+    def clear_ref_trace(self):
+        """Remove the reference overlay."""
+        self._ref_trace = None
+        if hasattr(self, "ref_label"):
+            self.ref_label.set("none")
+        self._plot_frame_key = None
+        self.plot_waveform()
+
+    def draw_ref_trace(self):
+        """Draw the saved reference trace behind the live trace (dimmed, dashed)."""
+        ref = getattr(self, "_ref_trace", None)
+        if ref is None:
+            return
+        x, y, label = ref
+        if not hasattr(self, "_ref_trace_artists"):
+            self._ref_trace_artists = []
+        for a in self._ref_trace_artists:
+            try:
+                a.remove()
+            except Exception:
+                pass
+        self._ref_trace_artists = []
+        line, = self.ax.plot(x, y, color="#7a8a7a", linewidth=1.0,
+                              linestyle="--", alpha=0.55, zorder=1)
+        annot = self.ax.annotate("REF", xy=(x[-1], y[-1]),
+                                  xycoords="data", fontsize=7,
+                                  color="#7a8a7a", alpha=0.75,
+                                  xytext=(3, 0), textcoords="offset points",
+                                  va="center")
+        self._ref_trace_artists = [line, annot]
+
+    # ------------------------------------------------------------------
+    # Zoom
+    def zoom_out(self):
+        """Reset the zoom to the full capture window."""
+        self._zoom_xlim = None
+        self._zoom_ylim = None
+        self._plot_frame_key = None
+        if hasattr(self, "_zoom_btn"):
+            self._zoom_btn.configure(state="disabled")
+        self.plot_waveform()
