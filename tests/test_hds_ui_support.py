@@ -1242,43 +1242,24 @@ class FrontPanelSyncTests(PanelTestCase):
 
 
 class ConnectionFieldTests(PanelTestCase):
-    """USB is the default transport, and a LAN address is not shown for it."""
+    """USB is the only transport: the address field and type selector are gone."""
 
-    def test_usb_is_the_default_transport(self):
-        self.assertEqual("usb", self.app.conn_type.get())
-
-    def test_the_address_field_is_not_on_screen_for_usb(self):
-        self.assertEqual("", self.app.conn_address.winfo_manager())
+    def test_usb_hint_is_shown(self):
+        # The "USB auto-detect" hint is always visible; there is no type selector.
         self.assertEqual("pack", self.app.conn_hint.winfo_manager())
 
-    def test_choosing_lan_brings_the_address_back(self):
-        self.app.conn_type.set("lan")
-        self.app.sync_connection_fields()
-        self.assertEqual("pack", self.app.conn_address.winfo_manager())
-        self.assertEqual("", self.app.conn_hint.winfo_manager())
+    def test_no_conn_type_selector(self):
+        # conn_type was the LAN/USB combobox variable — removed with LAN.
+        self.assertFalse(hasattr(self.app, "conn_type"))
 
-    def test_choosing_usb_again_takes_it_away(self):
-        self.app.conn_type.set("lan")
-        self.app.sync_connection_fields()
-        self.app.conn_type.set("usb")
-        self.app.sync_connection_fields()
-        self.assertEqual("", self.app.conn_address.winfo_manager())
+    def test_no_address_field(self):
+        # conn_address was the LAN IP entry — removed with LAN.
+        self.assertFalse(hasattr(self.app, "conn_address"))
 
-    def test_the_address_field_keeps_its_text_across_the_switch(self):
-        # Switching back to LAN must not lose the address that was typed.
-        self.app.conn_address.delete(0, "end")
-        self.app.conn_address.insert(0, "192.168.0.7")
-        for value in ("usb", "lan"):
-            self.app.conn_type.set(value)
-            self.app.sync_connection_fields()
-        self.assertEqual("192.168.0.7", self.app.conn_address.get())
-
-    def test_connecting_over_usb_never_uses_the_lan_address(self):
-        # The field still holds the LAN default underneath; USB must not see it.
+    def test_connecting_uses_usb(self):
         self.scope.connect_usb.return_value = True
         self.scope.get_idn.return_value = "OWON,HDS271,25520161,V1.3.0"
         self.app.connect_scope()
-        # The transport is opened on the worker, so the call is made a moment later.
         self.assertTrue(self.app.wait_for_instrument())
         self.scope.connect_usb.assert_called_once_with("auto", 115200)
 

@@ -24,24 +24,7 @@ class ConnectionMixin:
     """Connection handling for the OWON panel."""
 
     def sync_connection_fields(self):
-        """Show the field the selected transport actually uses.
-
-        USB finds the instrument by VID/PID, so there is nothing to type: the
-        address box is removed and replaced by a plain hint. Choosing LAN brings
-        the address back in the same place, before the Connect button, plus a
-        note that the LAN/SDS path is legacy and not re-verified.
-        """
-        for widget in (self.conn_address, self.conn_hint,
-                       getattr(self, "conn_lan_note", None)):
-            if widget is not None:
-                widget.pack_forget()
-        if self.conn_type.get().strip().lower() == "usb":
-            self.conn_hint.pack(side="left", padx=5, before=self.connect_btn)
-        else:
-            self.conn_address.pack(side="left", padx=5, before=self.connect_btn)
-            lan_note = getattr(self, "conn_lan_note", None)
-            if lan_note is not None:
-                lan_note.pack(side="left", padx=(0, 5), before=self.connect_btn)
+        """No-op: only USB is supported; nothing to switch."""
 
     def toggle_connection(self):
         if self._is_connected():
@@ -105,66 +88,38 @@ class ConnectionMixin:
         return model
 
     def connect_scope(self):
-        address = self.conn_address.get().strip()
-        conn_type = self.conn_type.get().strip().lower()
-        port_text = getattr(self, "conn_port", None)
-        port_value = port_text.get().strip() if port_text is not None else ""
-
-        # The address box is not on screen for USB, and the instrument is found by
-        # VID/PID (HDS) or auto-detected as a COM port (serial models), so nothing
-        # typed for LAN can steer this. Which of several attached scopes to open IS
-        # steerable, and that is the serial from the setup - worth having, because
-        # the HID endpoint takes one owner at a time and opening the wrong
-        # instrument looks like no scope.
+        """Connect to the OWON scope via USB HID (VID/PID 5345:1234)."""
         chosen = self.setup.usb_serial
         attached = _attached_scopes()
-        if conn_type == "usb" and len(attached) > 1:
+        if len(attached) > 1:
             self.log("%d OWON USB devices attached; using %s. Pick one in SETUP."
                      % (len(attached), chosen or "the first found"))
-        try:
-            baudrate = int(port_value) if port_value else 115200
-            port = int(port_value) if port_value else 3000
-        except ValueError:
-            messagebox.showerror("Connection Error", "Invalid port or baud rate")
-            return
+        elif not attached:
+            self.log("No OWON USB device found. Is the scope powered and plugged in?", "WARNING")
 
-        # Opening the transport happens on the worker, like every other call. It is
-        # not instant: a USB probe that has to try several ports takes seconds, and
-        # on a button press that was seconds of a window that would not answer.
         self._set_status("Connecting\u2026")
         self.connect_btn.config(text="Connecting\u2026", state="disabled")
         self.report_later("connect",
-                          lambda scope: self.open_transport(scope, conn_type, chosen,
-                                                            baudrate, address, port),
-                          lambda answer, error=None: self.finish_connect(conn_type, answer, error))
+                          lambda scope: self.open_transport(scope, chosen),
+                          lambda answer, error=None: self.finish_connect(answer, error))
 
     @staticmethod
-    def open_transport(scope, conn_type, chosen, baudrate, address, port):
-        """Open the transport and ask the instrument what it is. On the worker.
-
-        Returns (opened, what it said). The *IDN? is made here rather than after the
-        hand-over because it is another round trip, and its answer is what the panel
-        shows as the device.
-        """
-        if conn_type == "usb":
-            if chosen and getattr(scope, "is_hds", False):
-                opened = scope.connect_usb_hid(serial=chosen)
-                if opened:
-                    scope.identify_model()
-            else:
-                opened = scope.connect_usb("auto", baudrate)
+    def open_transport(scope, chosen):
+        """Open USB HID and identify the instrument. On the worker."""
+        if chosen and getattr(scope, "is_hds", False):
+            opened = scope.connect_usb_hid(serial=chosen)
+            if opened:
+                scope.identify_model()
         else:
-            opened = scope.connect_lan(address or "10.1.1.131", port)
+            opened = scope.connect_usb("auto", 115200)
         if not opened:
             return False, ""
         try:
             return True, (scope.get_idn() or "")
         except Exception:
-            # Connected but unwilling to identify itself: keep the connection and
-            # let the other reads fill the panel in.
             return True, ""
 
-    def finish_connect(self, conn_type, answer, error=None):
+    def finish_connect(self, answer, error=None):
         """Wire the panel up to the instrument that answered, or say that it did not."""
         self.connect_btn.config(state="normal")
         opened, idn = (answer if isinstance(answer, tuple) else (bool(answer), ""))
@@ -173,21 +128,20 @@ class ConnectionMixin:
             if error is not None:
                 self.log(f"Connection failed: {error}", "ERROR")
                 messagebox.showerror("Connection Error",
-                                     f"Failed to connect via {conn_type.upper()}\n{error}")
+                                     f"Failed to connect via USB\n{error}")
             else:
                 messagebox.showerror("Connection Error",
-                                     f"Failed to connect via {conn_type.upper()}")
+                                     "Failed to connect via USB.\n"
+                                     "Is the scope powered and plugged in?")
             self._set_status("Connection failed")
             self.update_state_indicator()
             return
 
         self.connect_btn.config(text="Disconnect")
-        # What this instrument is decides which calibration applies to it. On the
-        # USB path the model has just been read from *IDN?; on a transport that has
-        # not identified itself yet this does nothing rather than guessing.
+        # What this instrument is decides which calibration applies to it.
         self.adopt_model()
-        self.device_info.set(idn or f"Connected via {conn_type.upper()}")
-        self._set_status(f"Connected via {conn_type.upper()}")
+        self.device_info.set(idn or "Connected via USB")
+        self._set_status("Connected via USB")
         # Hide channels this instrument does not have, and prime the cursors.
         try:
             self.scope.forget_channel_count()

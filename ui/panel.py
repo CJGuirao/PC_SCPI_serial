@@ -167,28 +167,14 @@ class ModernLabUI:
         # reads backwards and reorders itself the moment someone edits it.
         transport = tk.Frame(header, bg=PANEL)
         transport.pack(side="right")
-        self.conn_type = tk.StringVar(value="usb")
         self.device_info = tk.StringVar(value="Not connected")
-        type_box = ttk.Combobox(transport, textvariable=self.conn_type, values=("lan", "usb"),
-                                state="readonly", width=5)
-        type_box.pack(side="left", padx=(0, 5))
-        # The HDS200/HDS300 is a USB instrument, so USB is the default. A LAN
-        # address means nothing to it, so the field is only on screen for the
-        # transport that uses it - otherwise it invites typing an address that
-        # would be ignored.
-        self.conn_address = ttk.Entry(transport, width=16)
-        self.conn_address.insert(0, "10.1.1.131")
-        # The LAN path is the SDS-series dialect (SDS6202, verified before the refactor).
-        # It was not re-verified after the package split and is marked legacy in the README.
-        self.conn_hint = tk.Label(transport, text="auto-detect", bg=PANEL, fg="#646c6c",
+        # HDS200/HDS300 is USB-only (raw HID, VID/PID 5345:1234).
+        # LAN was the SDS6202 path and has been removed.
+        self.conn_hint = tk.Label(transport, text="USB auto-detect", bg=PANEL, fg="#646c6c",
                                   font=("Segoe UI", 9))
-        self.conn_lan_note = tk.Label(transport,
-                                      text="LAN: SDS dialect (legacy, not re-verified)",
-                                      bg=PANEL, fg="#a08060", font=("Segoe UI", 8))
+        self.conn_hint.pack(side="left", padx=(0, 5))
         self.connect_btn = ttk.Button(transport, text="Connect", command=lambda: self.action(self.toggle_connection))
         self.connect_btn.pack(side="left", padx=5)
-        self.sync_connection_fields()
-        type_box.bind("<<ComboboxSelected>>", lambda event: self.sync_connection_fields())
 
         chassis = tk.Frame(self.root, bg=PANEL, bd=3, relief="ridge")
         chassis.pack(fill="both", expand=True, padx=12, pady=(0, 8))

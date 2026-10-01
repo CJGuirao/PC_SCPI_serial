@@ -165,8 +165,7 @@ class SetupDialogTests(PanelTestCase):
 class DeviceSelectionTests(PanelTestCase):
     """The saved serial is what steers the HID connect."""
 
-    def connect(self, conn_type="usb"):
-        self.app.conn_type.set(conn_type)
+    def connect(self):
         self.app.scope.connect_usb_hid.return_value = True
         self.app.scope.connect_usb.return_value = True
         with patch("main.attached_scopes", return_value=[]), \
@@ -203,7 +202,6 @@ class DeviceSelectionTests(PanelTestCase):
         devices = [{"product": "a", "serial": "25520161", "vid": 0x5345, "pid": 0x1234},
                    {"product": "b", "serial": "99999999", "vid": 0x5345, "pid": 0x1234}]
         with patch("main.attached_scopes", return_value=devices):
-            self.app.conn_type.set("usb")
             self.app.scope.connect_usb_hid.return_value = True
             with patch.object(self.app, "query_all_states"), patch.object(self.app, "sync_dmm"), \
                     patch.object(self.app, "refresh_cursors"), \
