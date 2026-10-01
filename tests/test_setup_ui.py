@@ -61,7 +61,18 @@ class ZoomTests(PanelTestCase):
     """Zoom lives in the ANALYSE drawer, not the display key strip."""
 
     def test_there_is_no_zoom_key_in_the_display_strip(self):
-        labels = [child.cget("text") for child in self.app._display_keys.winfo_children()]
+        # _display_keys now contains two row frames; collect button labels from both.
+        labels = []
+        for child in self.app._display_keys.winfo_children():
+            try:
+                labels.append(child.cget("text"))
+            except Exception:
+                # It's a sub-frame (row1/row2) — collect its children.
+                for grandchild in child.winfo_children():
+                    try:
+                        labels.append(grandchild.cget("text"))
+                    except Exception:
+                        pass
         self.assertTrue(labels)
         for label in labels:
             self.assertNotIn("ZOOM", label.upper())

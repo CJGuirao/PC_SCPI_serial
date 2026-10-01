@@ -233,23 +233,39 @@ class ModernLabUI:
         vertical = self.group(controls, "VERTICAL", 2, 0, span=2)
         self.build_channels(vertical)
 
+        # Two-row key bar: drawers on top, file/utility on bottom.
+        # Both rows sit inside one dark Frame so they share the panel colour.
         keys = tk.Frame(controls, bg="#303638")
         keys.grid(row=3, column=0, columnspan=2, sticky="ew", padx=4, pady=(6, 2))
         self._display_keys = keys
-        for label, command in (
-                ("MEASURE", lambda: self.show_drawer(0)),
-                ("ACQUIRE", lambda: self.show_drawer(1)),
-                ("ANALYSE", lambda: self.show_drawer(2)),
-                ("DECODE",  lambda: self.show_drawer(4)),
-                ("TABLE",   self.show_table),
-                ("SETUP",   self.open_setup),
-                ("OPEN",    self.open_capture),
-                ("SAVE",    self.save_waveform),
-                ("UTILITY", lambda: self.show_drawer(3))):
-            btn = self.key(keys, label, command, color="#444c4e")
-            btn.configure(fg="#f1f3ed", activeforeground=INK,
-                          padx=3, font=("Segoe UI", 8, "bold"))
-            btn.pack(side="left", fill="x", expand=True, padx=1, pady=2)
+
+        def _dkey(parent, label, command):
+            """A single drawer/action key in the bar style."""
+            b = self.key(parent, label, command, color="#3a4244")
+            b.configure(fg="#d8e4e2", activeforeground="#ffffff",
+                        activebackground="#505c5e",
+                        padx=4, pady=5, font=("Segoe UI", 8, "bold"), bd=1)
+            b.pack(side="left", fill="x", expand=True, padx=1, pady=2)
+            return b
+
+        row1 = tk.Frame(keys, bg="#303638")
+        row1.pack(fill="x")
+        row2 = tk.Frame(keys, bg="#303638")
+        row2.pack(fill="x")
+
+        # Row 1 — analytical drawers (most-used)
+        _dkey(row1, "MEASURE", lambda: self.show_drawer(0))
+        _dkey(row1, "ACQUIRE", lambda: self.show_drawer(1))
+        _dkey(row1, "ANALYSE", lambda: self.show_drawer(2))
+        _dkey(row1, "DECODE",  lambda: self.show_drawer(4))
+        _dkey(row1, "UTILITY", lambda: self.show_drawer(3))
+
+        # Row 2 — data / file / navigation
+        _dkey(row2, "TABLE",   self.show_table)
+        _dkey(row2, "SETUP",   self.open_setup)
+        _dkey(row2, "OPEN",    self.open_capture)
+        _dkey(row2, "SAVE",    self.save_waveform)
+        _dkey(row2, "CONSOLE", self.open_console)
 
         self._drawer_container = tk.Frame(controls, bg=PANEL)
         self._drawer_container.grid(row=4, column=0, columnspan=2, sticky="ew", padx=4)
