@@ -458,6 +458,7 @@ class ViewsMixin:
             self._plot_frame_key = frame_key
 
         self.draw_ref_trace()
+        self.draw_protocol_frames()
         self.draw_reference_lines(plotted)
         self.draw_zero_markers(references if plotted else [])
         self.canvas.draw_idle()
@@ -721,3 +722,156 @@ class ViewsMixin:
         if hasattr(self, "_zoom_btn"):
             self._zoom_btn.configure(state="disabled")
         self.plot_waveform()
+
+    # ------------------------------------------------------------------
+    # Protocol decode
+    def run_protocol_decode(self):
+        """Decode the current capture with the selected protocol and annotate the plot."""
+        from modernlab.decode import uart, spi, i2c, can
+
+        channels = self.capture_channels()
+        if not channels:
+            self.log("Protocol decode: no capture available.", "WARNING")
+            return
+
+        # Collect the first two channel arrays.
+        ch_data = []
+        for ch in channels[:2]:
+            y = np.asarray(ch.get("waveform", []), dtype=float)
+            if y.size == 0:
+                continue
+            number = self.channel_number(ch)
+            if number:
+                y = y * self.display_ratio(number, ch)
+                y = y + self.display_offset(number)
+            interval = float(ch.get("point_interval", 0) or 0)
+            factor, _unit = self.time_axis_units(interval * (y.size - 1)) if interval and y.size else (1.0, "s")
+            x = np.arange(y.size, dtype=float) * interval * factor
+            ch_data.append((str(ch.get("name", "CH1")).upper(), x, y))
+
+        if not ch_data:
+            self.log("Protocol decode: channel data is empty.", "WARNING")
+            return
+
+        protocol = getattr(self, "proto_var", None)
+        protocol = protocol.get() if protocol else "UART"
+
+        baud_str = getattr(self, "proto_baud_var", None)
+        baud_str = (baud_str.get() if baud_str else "auto").strip().lower()
+        baud = None if baud_str in ("", "auto") else int(float(baud_str))
+
+        thr_str = getattr(self, "proto_thr_var", None)
+        thr_str = (thr_str.get() if thr_str else "auto").strip().lower()
+        threshold = None if thr_str in ("", "auto") else float(thr_str)
+
+        invert = bool(getattr(self, "proto_invert", None) and self.proto_invert.get())
+
+        name0, x0, y0 = ch_data[0]
+
+        try:
+            if protocol == "UART":
+                frames = uart.decode(x0, y0, baud=baud, threshold=threshold,
+                                     invert=invert, channel=name0)
+                summary = uart.describe(frames)
+            elif protocol == "SPI":
+                if len(ch_data) < 2:
+                    frames = spi.decode(x0, y0, threshold=threshold, channel_mosi=name0)
+                else:
+                    _, x1, y1 = ch_data[1]
+                    frames = spi.decode(x0, y0, x1, y1, threshold=threshold,
+                                        channel_mosi=name0, channel_miso=ch_data[1][0])
+                summary = spi.describe(frames)
+            elif protocol == "I2C":
+                if len(ch_data) < 2:
+                    frames = []; summary = "I2C needs two channels (SCL + SDA)."
+                else:
+                    _, x1, y1 = ch_data[1]
+                    frames = i2c.decode(x0, y0, x1, y1, threshold=threshold)
+                    summary = i2c.describe(frames)
+            elif protocol == "CAN":
+                frames = can.decode(x0, y0, bit_rate=baud, threshold=threshold,
+                                    channel=name0)
+                summary = can.describe(frames)
+            else:
+                frames = []; summary = "Unknown protocol."
+        except Exception as exc:
+            self.log("Protocol decode error: %s" % exc, "ERROR")
+            if hasattr(self, "proto_result_var"):
+                self.proto_result_var.set("Error: %s" % exc)
+            return
+
+        self._proto_frames = frames
+        if hasattr(self, "proto_result_var"):
+            self.proto_result_var.set(summary)
+        self.log(summary)
+        self._plot_frame_key = None
+        self.plot_waveform()
+
+    def clear_protocol_decode(self):
+        """Remove protocol decode annotations from the plot."""
+        self._proto_frames = []
+        for a in getattr(self, "_proto_artists", []):
+            try:
+                a.remove()
+            except Exception:
+                pass
+        self._proto_artists = []
+        if hasattr(self, "proto_result_var"):
+            self.proto_result_var.set("")
+        self._plot_frame_key = None
+        self.plot_waveform()
+
+    def draw_protocol_frames(self):
+        """Draw decoded protocol frames as annotated spans on the time plot."""
+        frames = getattr(self, "_proto_frames", [])
+        artists = getattr(self, "_proto_artists", [])
+        for a in artists:
+            try:
+                a.remove()
+            except Exception:
+                pass
+        self._proto_artists = []
+        if not frames:
+            return
+
+        # Colour map per frame kind.
+        KIND_COLORS = {
+            "data":    "#7bd6ff",
+            "address": "#ffd166",
+            "start":   "#9cdc9c",
+            "stop":    "#9cdc9c",
+            "ack":     "#9cdc9c",
+            "nak":     "#ff7b72",
+            "error":   "#ff7b72",
+            "id":      "#ffd166",
+            "control": "#c792ea",
+            "crc":     "#888",
+            "eof":     "#555",
+            "sof":     "#9cdc9c",
+            "clock":   "#555",
+        }
+        ylim = self.ax.get_ylim()
+        y_lo, y_hi = ylim
+        span_h = (y_hi - y_lo) * 0.08   # annotation band at the bottom
+
+        for frame in frames:
+            color = KIND_COLORS.get(frame.kind, "#7bd6ff")
+            # Span the width of the frame.
+            if frame.t_start < frame.t_end:
+                span = self.ax.axvspan(frame.t_start, frame.t_end,
+                                       ymin=0.0, ymax=0.08,
+                                       color=color, alpha=0.35, zorder=2)
+                self._proto_artists.append(span)
+            # Label above the span.
+            label = frame.label or frame.kind
+            if len(label) > 12:
+                label = label[:11] + "…"
+            t_mid = (frame.t_start + frame.t_end) / 2.0 if frame.t_end > frame.t_start else frame.t_start
+            ann = self.ax.annotate(
+                label,
+                xy=(t_mid, y_lo + span_h * 1.1),
+                fontsize=6.5, color=color,
+                ha="center", va="bottom", rotation=90 if frame.t_end - frame.t_start < 1e-6 else 0,
+                annotation_clip=True,
+            )
+            self._proto_artists.append(ann)

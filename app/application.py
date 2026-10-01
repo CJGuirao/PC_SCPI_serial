@@ -138,6 +138,11 @@ class App(ConnectionMixin, ControlsMixin, DmmMixin, FramingMixin, ViewsMixin, Re
         self._zoom_ylim = None
         #: matplotlib RectangleSelector instance for drag-to-zoom.
         self._zoom_selector = None
+        # --- Protocol decode ---
+        #: List of decoded Frame objects from the last DECODE run, or [].
+        self._proto_frames = []
+        #: Artist handles for the protocol annotations on the plot.
+        self._proto_artists = []
 
         self.setup_gui()
         self.capture_state.set("NO ACQUISITION")

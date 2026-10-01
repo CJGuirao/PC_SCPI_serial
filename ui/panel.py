@@ -1299,6 +1299,46 @@ class ModernLabUI:
         # The spectrum and maths options are read back by the app when it draws.
         self.spectrum_text = self.text_area(parent)
 
+        # ── PROTOCOL DECODE ──────────────────────────────────────────
+        proto_frame = ttk.Frame(parent, padding=(8, 4, 8, 4))
+        proto_frame.pack(side="left", anchor="n", padx=6)
+        ttk.Label(proto_frame, text="DECODE", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+
+        row = ttk.Frame(proto_frame)
+        row.pack(anchor="w", pady=(4, 2))
+        ttk.Label(row, text="Protocol").pack(side="left", padx=(0, 4))
+        self.proto_var = tk.StringVar(value="UART")
+        proto_box = ttk.Combobox(row, textvariable=self.proto_var,
+                                 values=("UART", "SPI", "I2C", "CAN"),
+                                 state="readonly", width=6)
+        proto_box.pack(side="left")
+
+        row2 = ttk.Frame(proto_frame)
+        row2.pack(anchor="w", pady=2)
+        ttk.Label(row2, text="Baud/Rate").pack(side="left", padx=(0, 4))
+        self.proto_baud_var = tk.StringVar(value="auto")
+        ttk.Entry(row2, textvariable=self.proto_baud_var, width=9).pack(side="left")
+
+        row3 = ttk.Frame(proto_frame)
+        row3.pack(anchor="w", pady=2)
+        ttk.Label(row3, text="Threshold V").pack(side="left", padx=(0, 4))
+        self.proto_thr_var = tk.StringVar(value="auto")
+        ttk.Entry(row3, textvariable=self.proto_thr_var, width=7).pack(side="left")
+
+        self.proto_invert = tk.BooleanVar(value=False)
+        tk.Checkbutton(proto_frame, text="Invert (RS-232)", variable=self.proto_invert,
+                       bg=PANEL, fg=INK, selectcolor=PANEL,
+                       activebackground=PANEL).pack(anchor="w", pady=1)
+
+        self.key(proto_frame, "DECODE", self.run_protocol_decode,
+                 color="#7bd6ff").pack(fill="x", pady=(4, 1))
+        self.key(proto_frame, "CLEAR", self.clear_protocol_decode,
+                 color="#444c4e").pack(fill="x", pady=1)
+        self.proto_result_var = tk.StringVar(value="")
+        tk.Label(proto_frame, textvariable=self.proto_result_var,
+                 bg=PANEL, fg="#7bd6ff", font=("Segoe UI", 7),
+                 wraplength=110, justify="left").pack(anchor="w", pady=(3, 0))
+
     def set_fft_option(self, key, value):
         self._fft_options[key] = value
         if self._view == "fft":
