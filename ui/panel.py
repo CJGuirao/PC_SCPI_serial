@@ -475,13 +475,20 @@ class ModernLabUI:
         else:
             variable.set(not variable.get())
 
-    def show_channels(self, available):
+    def show_channels(self, available, from_instrument=False):
         """Show only this many channels, on the panel and in the plot readouts.
 
         A single-channel HDS271 answers nothing on :CH2:, so its column, its plot
         readout and the measurement source are all removed rather than left on
-        screen doing nothing.
+        screen doing nothing.  Views that require two channels (MATH, XY) are also
+        hidden when only one channel is available.
+
+        ``from_instrument=True`` means the count came from a real instrument probe
+        and should gate the two-channel view buttons.  The startup default of 1
+        does not gate them so tests that load multi-channel captures still work.
         """
+        if from_instrument:
+            self._available_channels = available
         for channel, frame in getattr(self, "_channel_frames", {}).items():
             if channel <= available:
                 if not frame.winfo_manager():
@@ -507,6 +514,8 @@ class ModernLabUI:
         self.log("%s reports %d channel%s" % (
             getattr(self.scope, "model", None) or "instrument",
             available, "" if available == 1 else "s"))
+        # Refresh view buttons so MATH/XY are hidden for single-channel devices.
+        self._refresh_view_buttons()
 
     def apply_channel_count(self):
         """Probe the instrument, then show only the channels it really has.
@@ -521,7 +530,8 @@ class ModernLabUI:
             self.show_channels(1)
             return
         self.report_later("channels", self.probe_channel_count,
-                          lambda available, error=None: self.show_channels(available or 1))
+                          lambda available, error=None: self.show_channels(
+                              available or 1, from_instrument=True))
 
     @staticmethod
     def probe_channel_count(scope):
@@ -943,8 +953,24 @@ class ModernLabUI:
             self.log("Could not draw the %s view: %s" % (name, exc), "ERROR")
 
     def _refresh_view_buttons(self):
+        # Two-channel views are hidden (pack_forget) for single-channel instruments.
+        # If the current view becomes unavailable, switch back to TIME.
+        two_ch_views = {"math", "xy"}
+        channels = getattr(self, "_available_channels", None)
+        # None means not yet probed — show everything, the probe will update.
+        single_channel = channels is not None and channels < 2
+        current = getattr(self, "_view", "time")
+        if single_channel and current in two_ch_views:
+            self._view = "time"
         for name, button in (self._view_buttons or {}).items():
-            active = (name == self._view)
+            if single_channel and name in two_ch_views:
+                button.pack_forget()
+            else:
+                if not button.winfo_manager():
+                    # Re-pack in the original order by repacking all visible buttons.
+                    # Simplest: just ensure it is managed (it may never have been hidden).
+                    button.pack(side="left", padx=2, pady=2)
+            active = (name == getattr(self, "_view", "time"))
             button.configure(bg=("#f1f3ed" if active else "#444c4e"),
                              fg=(INK if active else "#f1f3ed"))
 
