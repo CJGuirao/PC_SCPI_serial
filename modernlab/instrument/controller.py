@@ -733,34 +733,65 @@ class OWONScopeController(SdsDialect, HdsDialect, FramingSettle, FramingWatch, M
     def auto_frame(self, target_cycles=3.0, channel=1, frame_vertically=True):
         """Frame the waveform the way the front panel AUTO key does.
 
-        This firmware exposes no autoset over SCPI -- the manual documents
-        ``:AUTO`` only for the DMM, and ``:AUTOset``/``:AUTOSet``/``:AUTO``/
-        ``:AUTOscale`` were each tried against a scrambled instrument and left
-        every setting unchanged.  So the framing is computed here from the
-        instrument's own measurements instead of delegated to the front panel.
+        Tries the hardware AUTO candidates first (:AUTOSet, :AUTO).  On
+        HDS271 V1.3.0 these are silently ignored, but on other firmware
+        versions they may work.  After a short settle, a fresh frame is
+        downloaded and the timebase is framed from the decoded frequency.
 
-        What takes effect is verified elsewhere: the horizontal scale (the number
-        of captured cycles tracks it exactly) and the trigger level.  The
-        vertical scale is computed and written, but this firmware accepts a
-        vertical write without changing the acquisition, so the report says what
-        was read back rather than claiming the framing happened.
-
-        Returns a report dict; never raises for a merely disappointing result.
+        What takes effect is verified elsewhere: the horizontal scale (the
+        number of captured cycles tracks it exactly) and the trigger level.
+        The vertical scale is computed and written, but this firmware accepts
+        a vertical write without changing the acquisition, so the report says
+        what was read back rather than claiming the framing happened.
         """
+        import time as _time
+        # --- Step 1: try hardware AUTO candidates ----------------------------
+        hw_candidates = (":AUTOSet", ":AUTOset EXECute", ":AUTO")
+        hw_tried = []
+        timebase_before = None
+        try:
+            timebase_before = self.get_timebase_scale()
+        except Exception:
+            pass
+        for cmd in hw_candidates:
+            try:
+                self.send_command(cmd)
+                hw_tried.append(cmd)
+            except Exception:
+                pass
+        if hw_tried:
+            # Give the hardware a moment to settle before checking whether it
+            # changed anything.  Bounded: on this firmware nothing changes.
+            _time.sleep(1.5)
+
         report = {
             "channel": channel, "timebase": None, "timebase_from": None,
             "trigger_level": None, "vertical_scale": None,
             "timebase_readback": None, "trigger_level_readback": None,
             "vertical_scale_readback": None, "applied": [], "notes": [],
             "measured_from": None,
+            "hw_auto_tried": hw_tried,
         }
         if not self.is_hds:
             report["notes"].append("auto framing is implemented for HDS models only")
             return report
-        if not self.waveform.channels:
-            if not self.download_waveform_data():
-                report["notes"].append("no capture available to measure")
-                return report
+        # Check whether hardware AUTO changed the timebase (i.e. it worked).
+        if hw_tried:
+            try:
+                timebase_after = self.get_timebase_scale()
+            except Exception:
+                timebase_after = None
+            if timebase_before and timebase_after and timebase_before != timebase_after:
+                report["notes"].append(
+                    "hardware AUTO responded: timebase changed from %s to %s"
+                    % (timebase_before, timebase_after))
+                report["applied"].append("hardware_auto")
+            else:
+                report["notes"].append(
+                    "hardware AUTO candidates (%s) sent but timebase unchanged "
+                    "(silently ignored on this firmware)" % ", ".join(hw_tried))
+        # Fresh frame so the software autoset measures the current state.
+        self.download_waveform_data(reuse_header=False, calibrate=True)
 
         trace = self.frame_from_trace(channel)
         measured = self.get_measurements_numeric(channel)

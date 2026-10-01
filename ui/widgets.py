@@ -129,3 +129,54 @@ def transport_icon(kind, colour, size=16, scale=4):
                       (mid + 0.04 * box, mid - radius + head * 0.9)], fill=colour)
     return ImageTk.PhotoImage(image.resize((size, size), Image.LANCZOS))
 
+
+class Tooltip:
+    """Show a small pop-up label after the pointer hovers over a widget.
+
+    Usage:
+        Tooltip(widget, "What this button does")
+
+    The tip appears after ``delay`` ms and disappears when the pointer
+    leaves the widget or the widget is destroyed.
+    """
+
+    def __init__(self, widget, text, delay=1200):
+        self._widget = widget
+        self._text = text
+        self._delay = delay
+        self._id = None
+        self._tip = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._cancel, add="+")
+        widget.bind("<ButtonPress>", self._cancel, add="+")
+        widget.bind("<Destroy>", self._cancel, add="+")
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        self._id = self._widget.after(self._delay, self._show)
+
+    def _cancel(self, _event=None):
+        if self._id:
+            self._widget.after_cancel(self._id)
+            self._id = None
+        if self._tip:
+            try:
+                self._tip.destroy()
+            except Exception:
+                pass
+            self._tip = None
+
+    def _show(self):
+        x = self._widget.winfo_rootx() + self._widget.winfo_width() // 2
+        y = self._widget.winfo_rooty() + self._widget.winfo_height() + 4
+        self._tip = tk.Toplevel(self._widget)
+        self._tip.wm_overrideredirect(True)
+        self._tip.wm_geometry("+%d+%d" % (x, y))
+        lbl = tk.Label(
+            self._tip, text=self._text, justify="left",
+            background="#ffffcc", foreground="#333333",
+            relief="solid", borderwidth=1,
+            font=("Segoe UI", 9), wraplength=280, padx=6, pady=4,
+        )
+        lbl.pack()
+

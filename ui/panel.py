@@ -25,7 +25,7 @@ from modernlab.settings.bench import PROBE_CHOICES, ScopeSetup, device_label
 # panel's own, because they describe the panel's behaviour and not the widgets'.
 from ui.widgets import (
     ASSETS, CYAN, HOLD_AMBER, INK, LIVE_GREEN, PANEL, PAUSE_RED, SCREEN, YELLOW,
-    Rotary, transport_icon,
+    Rotary, Tooltip, transport_icon,
 )
 from ui.dialogs import CaptureTableDialog, ReadoutDialog, ScpiConsoleDialog, SetupDialog
 
@@ -216,10 +216,29 @@ class ModernLabUI:
                                   text="LIVE", font=("Segoe UI", 9, "bold"))
         self.live_btn.pack(side="left", expand=True, fill="x", padx=3)
         self.update_live_button()
-        self.key(acq, "CAPTURE", self.download_waveform).pack(side="left", expand=True, fill="x", padx=3)
-        # AUTO is the front panel's autoset: find the signal and frame it.
-        self.key(acq, "AUTO", self.auto_frame, color="#9cd4e8").pack(side="left", expand=True, fill="x", padx=3)
-        self.key(acq, "SINGLE", self.single_trigger).pack(side="left", expand=True, fill="x", padx=3)
+        Tooltip(self.live_btn,
+                "LIVE — start/pause continuous capture.\n"
+                "Also sends RUN/STOP to the instrument so its screen\n"
+                "and the software stay in sync.")
+        cap_btn = self.key(acq, "CAPTURE", self.download_waveform)
+        cap_btn.pack(side="left", expand=True, fill="x", padx=3)
+        Tooltip(cap_btn,
+                "CAPTURE — grab one frame right now.\n"
+                "Useful when the live loop is paused.")
+        single_btn = self.key(acq, "SINGLE", self.single_trigger)
+        single_btn.pack(side="left", expand=True, fill="x", padx=3)
+        Tooltip(single_btn,
+                "SINGLE — arm the instrument for a single trigger.\n"
+                "The scope waits for the next edge, captures one frame,\n"
+                "then freezes its own screen.")
+        # AUTO goes last (right-hand side) — it changes the instrument settings
+        # so it is separated from the frame-capture buttons.
+        auto_btn = self.key(acq, "AUTO", self.auto_frame, color="#9cd4e8")
+        auto_btn.pack(side="left", expand=True, fill="x", padx=3)
+        Tooltip(auto_btn,
+                "AUTO — try the hardware AUTO key, then frame the time\n"
+                "axis from the measured signal frequency.\n"
+                "Reads back all controls from the instrument afterwards.")
         ttk.Label(controls, text="Knobs: drag • wheel • arrow keys",
                   foreground="#626968").grid(row=3, column=0, columnspan=2, pady=(9, 0))
 

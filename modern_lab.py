@@ -11,7 +11,7 @@ import threading
 from modernlab.app.io_worker import PRIORITY_CAPTURE, PRIORITY_COMMAND, PRIORITY_REFRESH
 from ui.widgets import (
     ASSETS, CYAN, HOLD_AMBER, INK, LIVE_GREEN, PANEL, PAUSE_RED, SCREEN, YELLOW,
-    Rotary, transport_icon,
+    Rotary, Tooltip, transport_icon,
 )
 from ui.panel import (
     CONNECTED_NAME, CURSOR_GRAB_PIXELS, CURSOR_TARGETS, LIVE_CALIBRATE_EVERY,
@@ -23,7 +23,7 @@ from ui.dialogs import CaptureTableDialog, ReadoutDialog, ScpiConsoleDialog, Set
 __all__ = [
     "threading",
     "ASSETS", "CYAN", "HOLD_AMBER", "INK", "LIVE_GREEN", "PANEL", "PAUSE_RED", "SCREEN",
-    "YELLOW", "Rotary", "transport_icon",
+    "YELLOW", "Rotary", "Tooltip", "transport_icon",
     "CONNECTED_NAME", "CURSOR_GRAB_PIXELS", "CURSOR_TARGETS", "LIVE_CALIBRATE_EVERY",
     "LIVE_FRAMING_EVERY", "LIVE_GAP_MS", "LIVE_HEADER_EVERY", "PALETTES",
     "UNCONNECTED_NAME", "VIEWS", "VIEW_LABELS", "ModernLabUI",

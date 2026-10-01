@@ -24,22 +24,27 @@ class AutosetMixin:
             self.tell_scope("Auto scale enabled", lambda scope: scope.auto_scale(True))
 
     def auto_frame(self):
-        """Front panel AUTO: search for the signal and frame it.
+        """AUTO: try the hardware AUTO key, then frame in software.
 
-        The instrument exposes no autoset command over SCPI, so the framing is
-        computed from the instrument's own measurements; see
-        OWONScopeController.auto_frame for what is verifiable on this firmware.
+        Steps (all on the worker thread):
+        1. Send the hardware AUTO candidates (:AUTOSet, :AUTO) and wait
+           ~1.5 s for the instrument to settle.  On this firmware these
+           commands are silently ignored, so the wait is bounded.
+        2. Download a fresh frame (fresh header, with calibration) so the
+           panel sees whatever the hardware changed.
+        3. Run the software autoset (time/div from frequency) as a fallback
+           for the horizontal framing - this is the one write that IS live.
+        4. Read back all controls from the instrument so the panel matches
+           whatever the hardware AUTO (or the software fallback) produced.
         """
         if not self.ready():
             return
         self._busy = True
         self._auto_report = None
-        self.capture_state.set("AUTO…")
-        self.status_var.set("Searching for the signal and framing it…")
-        # On the worker like everything else: AUTO measures, decides and writes,
-        # which is several round trips. It used to post to a queue that only the
-        # capture path drained, so it could wait for a frame that never came.
+        self.capture_state.set("AUTO\u2026")
+        self.status_var.set("AUTO: trying hardware key then framing from signal\u2026")
         self.ask_scope("autoset", lambda scope: scope.auto_frame())
+
 
     def report_auto_frame(self):
         """Log what AUTO actually changed, and anything it could not."""
