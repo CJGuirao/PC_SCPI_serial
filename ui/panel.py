@@ -267,13 +267,14 @@ class ModernLabUI:
         _dkey(row2, "SAVE",    self.save_waveform)
         _dkey(row2, "CONSOLE", self.open_console)
 
-        self._drawer_container = tk.Frame(controls, bg=PANEL)
-        self._drawer_container.grid(row=4, column=0, columnspan=2, sticky="ew", padx=4)
-
         ttk.Label(controls, text="Knobs: drag • wheel • arrow keys",
-                  foreground="#626968").grid(row=5, column=0, columnspan=2, pady=(4, 0))
+                  foreground="#626968").grid(row=4, column=0, columnspan=2, pady=(4, 0))
 
-        self.drawer = ttk.Notebook(self._drawer_container)
+        # The drawer is a floating Toplevel so it can be positioned anywhere.
+        self._drawer_win = None   # created lazily on first open
+        self.drawer = None        # set by _ensure_drawer_win()
+        self._drawer_open = False
+        self._ensure_drawer_win()
         self.build_drawer()
         footer = tk.Frame(self.root, bg=PANEL)
         footer.pack(side="bottom", fill="x", padx=18, pady=(0, 8))
@@ -827,17 +828,52 @@ class ModernLabUI:
                     lambda e: canvas.xview_scroll(int(-1*(e.delta/120)), "units"))
         return inner
 
+    def _ensure_drawer_win(self):
+        """Create (or recreate after destroy) the floating drawer window."""
+        if self._drawer_win is not None:
+            try:
+                if self._drawer_win.winfo_exists():
+                    return
+            except Exception:
+                pass
+        win = tk.Toplevel(self.root)
+        win.title("Panel")
+        win.resizable(True, True)
+        win.protocol("WM_DELETE_WINDOW", self.hide_drawer)
+        # Position near the right edge of the main window on first creation.
+        try:
+            rx = self.root.winfo_x() + self.root.winfo_width() - 860
+            ry = self.root.winfo_y() + 60
+            win.geometry("+%d+%d" % (max(rx, 0), max(ry, 0)))
+        except Exception:
+            pass
+        win.withdraw()   # hidden until show_drawer is called
+        self._drawer_win = win
+        # Recreate the Notebook inside the new window.
+        if self.drawer is not None:
+            try:
+                self.drawer.destroy()
+            except Exception:
+                pass
+        self.drawer = ttk.Notebook(win)
+        self.drawer.pack(fill="both", expand=True, padx=4, pady=4)
+
     def show_drawer(self, index):
+        self._ensure_drawer_win()
         if self._drawer_open and self.drawer.index("current") == index:
             self.hide_drawer()
             return
-        self.drawer.grid(row=0, column=0, sticky="ew")
-        self._drawer_container.grid_columnconfigure(0, weight=1)
+        self._drawer_win.deiconify()
+        self._drawer_win.lift()
         self.drawer.select(index)
         self._drawer_open = True
 
     def hide_drawer(self):
-        self.drawer.grid_forget()
+        if self._drawer_win is not None:
+            try:
+                self._drawer_win.withdraw()
+            except Exception:
+                pass
         self._drawer_open = False
 
     def single_trigger(self):
@@ -1820,7 +1856,11 @@ class ModernLabUI:
             self.status_var.set("Finishing acquisition before closing…")
         else:
             self.finish_close()
-
+        if getattr(self, "_drawer_win", None) is not None:
+            try:
+                self._drawer_win.destroy()
+            except Exception:
+                pass
 
     def finish_close(self):
         # The worker is stopped before the widgets go: a result arriving after the
