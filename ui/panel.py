@@ -631,6 +631,7 @@ class ModernLabUI:
             ("MEASURE", lambda: self.show_drawer(0)),
             ("ACQUIRE", lambda: self.show_drawer(1)),
             ("ANALYSE", lambda: self.show_drawer(2)),
+            ("DECODE",  lambda: self.show_drawer(4)),
             ("TABLE", self.show_table),
             ("SETUP", self.open_setup),
             ("OPEN", self.open_capture),
@@ -671,21 +672,25 @@ class ModernLabUI:
         acquire = ttk.Frame(self.drawer, padding=10)
         utility = ttk.Frame(self.drawer, padding=8)
         analyse = ttk.Frame(self.drawer, padding=8)
+        decode_tab = ttk.Frame(self.drawer, padding=8)
         self.drawer.add(measure, text="Measurements")
         self.drawer.add(acquire, text="Acquisition")
         # Analyse sits before Utility, and the key row's indices rely on that order.
         self.drawer.add(analyse, text="Analyse")
         self.drawer.add(utility, text="Utility & log")
+        self.drawer.add(decode_tab, text="Decode")
         self.build_analysis(analyse)
-        self.meas_source = ttk.Combobox(measure, values=("CH1", "CH2"), state="readonly", width=6)
+        self.build_decode_tab(decode_tab)
+        measure_row = self.scrollable_row(measure)
+        self.meas_source = ttk.Combobox(measure_row, values=("CH1", "CH2"), state="readonly", width=6)
         self.meas_source.set("CH1")
         self.meas_source.pack(side="left", anchor="n", padx=5)
-        self.key(measure, "READ", self.get_measurements).pack(side="left", anchor="n", padx=5)
+        self.key(measure_row, "READ", self.get_measurements).pack(side="left", anchor="n", padx=5)
         # The HDS271 carries a multimeter next to the scope: :DMM:MEAS? reads it
         # and :DMM:REL/:DMM:CONFigure set it up. It is a separate subsystem, so
         # its readout lives here rather than on the trace, and it is polled on
         # the same timer as the rest of the status.
-        multimeter = ttk.Frame(measure, padding=(12, 0, 6, 0))
+        multimeter = ttk.Frame(measure_row, padding=(12, 0, 6, 0))
         multimeter.pack(side="left", anchor="n", padx=5)
         ttk.Label(multimeter, text="MULTIMETER", font=("Segoe UI", 9, "bold")).pack(anchor="w")
         self.dmm_value = tk.StringVar(value="—")
@@ -744,6 +749,38 @@ class ModernLabUI:
         text.pack(fill="both", expand=True)
         scroll.config(command=text.yview)
         return text
+
+    def scrollable_row(self, parent):
+        """Return a Frame that scrolls horizontally inside parent.
+
+        The drawer tabs pack sections side-by-side and overflow when the
+        window is smaller than their total width.  Wrapping them in a
+        scrollable canvas fixes this at any window size.
+        """
+        outer = tk.Frame(parent, bg=PANEL)
+        outer.pack(fill="both", expand=True)
+        hbar = tk.Scrollbar(outer, orient="horizontal")
+        hbar.pack(side="bottom", fill="x")
+        canvas = tk.Canvas(outer, bg=PANEL, highlightthickness=0,
+                           height=130, xscrollcommand=hbar.set)
+        canvas.pack(side="top", fill="both", expand=True)
+        hbar.config(command=canvas.xview)
+        inner = tk.Frame(canvas, bg=PANEL)
+        win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            # Make the inner frame at least as tall as the canvas so top-anchored
+            # children fill the height and the background shows correctly.
+            if inner.winfo_reqheight() < canvas.winfo_height():
+                canvas.itemconfig(win_id, height=canvas.winfo_height())
+
+        inner.bind("<Configure>", _on_configure)
+        canvas.bind("<Configure>", _on_configure)
+        # Mouse-wheel horizontal scroll (Windows sends MouseWheel; bind to canvas).
+        canvas.bind("<MouseWheel>",
+                    lambda e: canvas.xview_scroll(int(-1*(e.delta/120)), "units"))
+        return inner
 
     def show_drawer(self, index):
         if self._drawer_open and self.drawer.index("current") == index:
@@ -1195,6 +1232,7 @@ class ModernLabUI:
     # The analysis drawer
     def build_analysis(self, parent):
         """The controls for what the analysis layer computes, and for reading it."""
+        parent = self.scrollable_row(parent)
         spectrum = ttk.Frame(parent, padding=(8, 4, 8, 4))
         spectrum.pack(side="left", anchor="n", padx=6)
         ttk.Label(spectrum, text="SPECTRUM", font=("Segoe UI", 9, "bold")).pack(anchor="w")
@@ -1256,24 +1294,28 @@ class ModernLabUI:
         tk.Label(row, textvariable=self.record_label, bg=PANEL, fg="#7a6a2e",
                  font=("Segoe UI", 8)).pack(side="left", padx=6)
 
-        # ── AVERAGING ────────────────────────────────────────────────
+        # The spectrum and maths options are read back by the app when it draws.
+        self.spectrum_text = self.text_area(parent)
+    def build_decode_tab(self, parent):
+        """Averaging, reference overlay, zoom and protocol decode."""
+        parent = self.scrollable_row(parent)
+
+        # AVERAGING
         avg_frame = ttk.Frame(parent, padding=(8, 4, 8, 4))
         avg_frame.pack(side="left", anchor="n", padx=6)
         ttk.Label(avg_frame, text="AVERAGING", font=("Segoe UI", 9, "bold")).pack(anchor="w")
-        ttk.Label(avg_frame, text="Frames", font=("Segoe UI", 8)).pack(anchor="w", pady=(4, 0))
+        ttk.Label(avg_frame, text="Frames (1=off)", font=("Segoe UI", 8)).pack(anchor="w", pady=(4, 0))
         self.avg_depth_var = tk.StringVar(value="1")
         avg_box = ttk.Combobox(avg_frame, textvariable=self.avg_depth_var,
                                values=("1", "2", "4", "8", "16", "32", "64"),
-                               state="readonly", width=5)
+                               state="readonly", width=6)
         avg_box.pack(anchor="w", pady=2)
         avg_box.bind("<<ComboboxSelected>>",
                      lambda e: self.set_avg_depth(int(self.avg_depth_var.get())))
-        ttk.Label(avg_frame, text="1 = off", font=("Segoe UI", 7),
-                  foreground="#8fa3a3").pack(anchor="w")
         self.key(avg_frame, "CLEAR AVG", self.clear_avg_buf,
                  color="#444c4e").pack(fill="x", pady=(4, 0))
 
-        # ── REFERENCE TRACE ──────────────────────────────────────────
+        # REFERENCE TRACE
         ref_frame = ttk.Frame(parent, padding=(8, 4, 8, 4))
         ref_frame.pack(side="left", anchor="n", padx=6)
         ttk.Label(ref_frame, text="REFERENCE", font=("Segoe UI", 9, "bold")).pack(anchor="w")
@@ -1283,26 +1325,27 @@ class ModernLabUI:
                  color="#444c4e").pack(fill="x", pady=1)
         self.ref_label = tk.StringVar(value="none")
         tk.Label(ref_frame, textvariable=self.ref_label, bg=PANEL, fg="#8fa3a3",
-                 font=("Segoe UI", 7), wraplength=80).pack(anchor="w", pady=(2, 0))
+                 font=("Segoe UI", 7), wraplength=90).pack(anchor="w", pady=(2, 0))
 
-        # ── ZOOM ─────────────────────────────────────────────────────
+        # ZOOM
         zoom_frame = ttk.Frame(parent, padding=(8, 4, 8, 4))
         zoom_frame.pack(side="left", anchor="n", padx=6)
         ttk.Label(zoom_frame, text="ZOOM", font=("Segoe UI", 9, "bold")).pack(anchor="w")
-        ttk.Label(zoom_frame, text="Right-drag on\nplot to zoom",
+        ttk.Label(zoom_frame, text="Right-drag\n(right btn) on plot",
                   font=("Segoe UI", 7), foreground="#8fa3a3",
                   justify="left").pack(anchor="w", pady=(2, 4))
         self._zoom_btn = self.key(zoom_frame, "ZOOM OUT", self.zoom_out, color="#444c4e")
         self._zoom_btn.pack(fill="x")
         self._zoom_btn.configure(state="disabled")
 
-        # The spectrum and maths options are read back by the app when it draws.
-        self.spectrum_text = self.text_area(parent)
+        # Separator
+        ttk.Separator(parent, orient="vertical").pack(side="left", fill="y", padx=8, pady=4)
 
-        # ── PROTOCOL DECODE ──────────────────────────────────────────
+        # PROTOCOL DECODE
         proto_frame = ttk.Frame(parent, padding=(8, 4, 8, 4))
         proto_frame.pack(side="left", anchor="n", padx=6)
-        ttk.Label(proto_frame, text="DECODE", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        ttk.Label(proto_frame, text="PROTOCOL DECODE",
+                  font=("Segoe UI", 9, "bold")).pack(anchor="w")
 
         row = ttk.Frame(proto_frame)
         row.pack(anchor="w", pady=(4, 2))
@@ -1310,34 +1353,55 @@ class ModernLabUI:
         self.proto_var = tk.StringVar(value="UART")
         proto_box = ttk.Combobox(row, textvariable=self.proto_var,
                                  values=("UART", "SPI", "I2C", "CAN"),
-                                 state="readonly", width=6)
+                                 state="readonly", width=7)
         proto_box.pack(side="left")
 
         row2 = ttk.Frame(proto_frame)
         row2.pack(anchor="w", pady=2)
-        ttk.Label(row2, text="Baud/Rate").pack(side="left", padx=(0, 4))
+        ttk.Label(row2, text="Baud / bit rate").pack(side="left", padx=(0, 4))
         self.proto_baud_var = tk.StringVar(value="auto")
-        ttk.Entry(row2, textvariable=self.proto_baud_var, width=9).pack(side="left")
+        ttk.Entry(row2, textvariable=self.proto_baud_var, width=10).pack(side="left")
 
         row3 = ttk.Frame(proto_frame)
         row3.pack(anchor="w", pady=2)
-        ttk.Label(row3, text="Threshold V").pack(side="left", padx=(0, 4))
+        ttk.Label(row3, text="Threshold (V)").pack(side="left", padx=(0, 4))
         self.proto_thr_var = tk.StringVar(value="auto")
         ttk.Entry(row3, textvariable=self.proto_thr_var, width=7).pack(side="left")
 
         self.proto_invert = tk.BooleanVar(value=False)
-        tk.Checkbutton(proto_frame, text="Invert (RS-232)", variable=self.proto_invert,
+        tk.Checkbutton(proto_frame, text="Invert  (idle-low / RS-232)",
+                       variable=self.proto_invert,
                        bg=PANEL, fg=INK, selectcolor=PANEL,
                        activebackground=PANEL).pack(anchor="w", pady=1)
 
-        self.key(proto_frame, "DECODE", self.run_protocol_decode,
-                 color="#7bd6ff").pack(fill="x", pady=(4, 1))
-        self.key(proto_frame, "CLEAR", self.clear_protocol_decode,
-                 color="#444c4e").pack(fill="x", pady=1)
+        btn_row = ttk.Frame(proto_frame)
+        btn_row.pack(anchor="w", pady=(6, 2))
+        self.key(btn_row, "DECODE", self.run_protocol_decode,
+                 color="#7bd6ff").pack(side="left", padx=(0, 4))
+        self.key(btn_row, "CLEAR", self.clear_protocol_decode,
+                 color="#444c4e").pack(side="left")
+
         self.proto_result_var = tk.StringVar(value="")
         tk.Label(proto_frame, textvariable=self.proto_result_var,
-                 bg=PANEL, fg="#7bd6ff", font=("Segoe UI", 7),
-                 wraplength=110, justify="left").pack(anchor="w", pady=(3, 0))
+                 bg=PANEL, fg="#7bd6ff", font=("Segoe UI", 8),
+                 wraplength=300, justify="left").pack(anchor="w", pady=(3, 0))
+
+        # Usage hints
+        hint_frame = ttk.Frame(parent, padding=(8, 4, 8, 4))
+        hint_frame.pack(side="left", anchor="n", padx=6)
+        ttk.Label(hint_frame, text="NOTES", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        ttk.Label(hint_frame,
+                  text=(
+                      "UART: CH1 only. Leave baud=auto.\n"
+                      "SPI:  CH1=SCK  CH2=MOSI.\n"
+                      "I2C:  CH1=SCL  CH2=SDA.\n"
+                      "CAN:  CH1 only (CAN-H or diff probe).\n"
+                      "Frames appear as coloured bands\n"
+                      "at the bottom of the time plot."
+                  ),
+                  font=("Segoe UI", 7), foreground="#8fa3a3",
+                  justify="left").pack(anchor="w", pady=(4, 0))
+
 
     def set_fft_option(self, key, value):
         self._fft_options[key] = value
