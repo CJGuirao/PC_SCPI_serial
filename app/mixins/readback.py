@@ -138,6 +138,7 @@ class ReadbackMixin:
         # of being printed side by side as though they agreed.
         trace = self.scope.frame_from_trace(channel)
         if isinstance(trace, dict) and trace:
+            self._accum_meas_stats(trace)
             lines.append("From the capture (calibrated - this is what the grid shows):")
             for label, key, unit in (("Vpp", "vpp", "V"), ("Vmax", "vmax", "V"),
                                      ("Vmin", "vmin", "V"), ("Vmean", "vmean", "V"),
@@ -427,3 +428,74 @@ class ReadbackMixin:
 
     def refresh_trigger_state(self):
         self.log("Trigger and acquisition state read back.")
+
+    # ------------------------------------------------------------------
+    # Measurement statistics
+    def _accum_meas_stats(self, trace):
+        """Accumulate one trace measurement snapshot into the rolling stats."""
+        from collections import deque
+        depth = getattr(self, "_meas_stats_depth", 100)
+        stats = getattr(self, "_meas_stats", {})
+        for key in ("vpp", "vmax", "vmin", "vmean", "frequency"):
+            v = trace.get(key)
+            if v is None:
+                continue
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                continue
+            if key not in stats:
+                stats[key] = deque(maxlen=depth)
+            stats[key].append(v)
+        self._meas_stats = stats
+        if hasattr(self, "_update_stats_display"):
+            self._update_stats_display()
+
+    def _update_stats_display(self):
+        """Refresh the stats table widget if it exists."""
+        import math
+        widget = getattr(self, "stats_text", None)
+        if widget is None:
+            return
+        stats = getattr(self, "_meas_stats", {})
+        if not stats:
+            return
+        rows = []
+        header = "%-12s %9s %9s %9s %9s %6s" % (
+            "Metric", "Last", "Min", "Max", "Mean", "N")
+        rows.append(header)
+        rows.append("-" * len(header))
+        UNITS = {"vpp": "V", "vmax": "V", "vmin": "V", "vmean": "V", "frequency": "Hz"}
+        LABELS = {"vpp": "Vpp", "vmax": "Vmax", "vmin": "Vmin",
+                  "vmean": "Vmean", "frequency": "Freq"}
+        for key in ("vpp", "vmax", "vmin", "vmean", "frequency"):
+            buf = stats.get(key)
+            if not buf:
+                continue
+            vals = list(buf)
+            n = len(vals)
+            last = vals[-1]
+            lo = min(vals)
+            hi = max(vals)
+            mean = sum(vals) / n
+            unit = UNITS.get(key, "")
+            label = LABELS.get(key, key)
+            from modernlab import analysis
+            fmt = analysis.format_hz if key == "frequency" else analysis.format_volts
+            rows.append("%-12s %9s %9s %9s %9s %6d" % (
+                label,
+                fmt(last), fmt(lo), fmt(hi), fmt(mean), n))
+        try:
+            widget.config(state="normal")
+            widget.delete("1.0", "end")
+            widget.insert("end", "\n".join(rows) + "\n")
+            widget.config(state="disabled")
+        except Exception:
+            pass
+
+    def reset_meas_stats(self):
+        """Clear the accumulated statistics."""
+        self._meas_stats = {}
+        if hasattr(self, "_update_stats_display"):
+            self._update_stats_display()
+        self.log("Measurement statistics cleared.")

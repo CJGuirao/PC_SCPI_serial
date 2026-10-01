@@ -715,6 +715,32 @@ class ModernLabUI:
         ttk.Label(multimeter, textvariable=self.dmm_note, wraplength=150,
                   foreground="#7a4a1e", font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
         self.measurement_text = self.text_area(measure)
+
+        # Statistics table — fills the rest of the Measurements tab.
+        stats_frame = ttk.Frame(measure, padding=(6, 4))
+        stats_frame.pack(side="left", fill="both", expand=True, anchor="n")
+        stats_hdr = ttk.Frame(stats_frame)
+        stats_hdr.pack(fill="x")
+        ttk.Label(stats_hdr, text="STATISTICS", font=("Segoe UI", 9, "bold")).pack(side="left")
+        ttk.Label(stats_hdr, text="(updates on each READ)",
+                  font=("Segoe UI", 7), foreground="#8fa3a3").pack(side="left", padx=(4, 8))
+        ttk.Label(stats_hdr, text="N=").pack(side="left")
+        self.stats_depth_var = tk.StringVar(value="100")
+        depth_box = ttk.Combobox(stats_hdr, textvariable=self.stats_depth_var,
+                                 values=("20", "50", "100", "500", "1000"),
+                                 state="readonly", width=5)
+        depth_box.pack(side="left", padx=(0, 4))
+        depth_box.bind("<<ComboboxSelected>>",
+                       lambda e: setattr(self, "_meas_stats_depth",
+                                         int(self.stats_depth_var.get())))
+        self.key(stats_hdr, "RESET", self.reset_meas_stats,
+                 color="#444c4e").pack(side="left")
+        # The stats table is a read-only monospaced text widget.
+        self.stats_text = tk.Text(stats_frame, height=8, width=56,
+                                  bg=SCREEN, fg="#c4d6d2",
+                                  font=("Consolas", 8), bd=0, padx=6, pady=4,
+                                  state="disabled")
+        self.stats_text.pack(fill="both", expand=True, pady=(4, 0))
         for label, name, values, default, command in (
             ("Type", "acq_type", self.choices("acquire_mode_choices", "ACQ_TYPES"),
              "SAMPle", self.set_acquire_type),
@@ -1337,6 +1363,28 @@ class ModernLabUI:
         self._zoom_btn = self.key(zoom_frame, "ZOOM OUT", self.zoom_out, color="#444c4e")
         self._zoom_btn.pack(fill="x")
         self._zoom_btn.configure(state="disabled")
+
+        # PERSISTENCE (digital phosphor)
+        persist_frame = ttk.Frame(parent, padding=(8, 4, 8, 4))
+        persist_frame.pack(side="left", anchor="n", padx=6)
+        ttk.Label(persist_frame, text="PERSISTENCE",
+                  font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        ttk.Label(persist_frame, text="Old frames (0=off)",
+                  font=("Segoe UI", 8)).pack(anchor="w", pady=(4, 0))
+        self.persist_depth_var = tk.StringVar(value="0")
+        persist_box = ttk.Combobox(persist_frame, textvariable=self.persist_depth_var,
+                                   values=("0", "4", "8", "16", "32", "64"),
+                                   state="readonly", width=6)
+        persist_box.pack(anchor="w", pady=2)
+        persist_box.bind("<<ComboboxSelected>>",
+                         lambda e: self.set_persist_depth(
+                             int(self.persist_depth_var.get())))
+        self.key(persist_frame, "CLEAR", self.clear_persist_buf,
+                 color="#444c4e").pack(fill="x", pady=(4, 0))
+        ttk.Label(persist_frame,
+                  text="Dimmed ghost traces\nshow rare glitches",
+                  font=("Segoe UI", 7), foreground="#8fa3a3",
+                  justify="left").pack(anchor="w", pady=(2, 0))
 
         # Separator
         ttk.Separator(parent, orient="vertical").pack(side="left", fill="y", padx=8, pady=4)

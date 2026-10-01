@@ -143,8 +143,19 @@ class App(ConnectionMixin, ControlsMixin, DmmMixin, FramingMixin, ViewsMixin, Re
         self._proto_frames = []
         #: Artist handles for the protocol annotations on the plot.
         self._proto_artists = []
+        # --- Measurement statistics ---
+        #: {metric: deque of float} — rolling history for min/max/mean/σ table.
+        self._meas_stats = {}
+        #: How many captures to keep in each stats deque (set from UI).
+        self._meas_stats_depth = 100
+        # --- Trace persistence (digital phosphor) ---
+        #: deque of (x_array, y_array, channel_name) for dimmed old traces.
+        self._persist_buf = {}      # {channel_name: deque of np.ndarray}
+        #: How many old frames to keep (0 = off).
+        self._persist_depth = 0
 
         self.setup_gui()
+        self._bind_keys()
         self.capture_state.set("NO ACQUISITION")
         self.status_var.set("Ready | Disconnected")
         self.update_time()
@@ -337,6 +348,39 @@ class App(ConnectionMixin, ControlsMixin, DmmMixin, FramingMixin, ViewsMixin, Re
                 self.record_label.set("%d file(s) written" % self._records)
             return True
         return super().on_instrument_result(kind, token, value, error)
+
+    def _bind_keys(self):
+        """Global keyboard shortcuts.
+
+        Entries are bound to the root window so they fire regardless of which
+        widget has focus, as long as no Entry widget is capturing the key.
+        The guard skips the shortcut when the event originates in an Entry or
+        Text so typing a baud rate or threshold doesn't trigger a capture.
+        """
+        def _guard(fn):
+            def handler(event):
+                if isinstance(event.widget, (tk.Entry, tk.Text)):
+                    return          # let the widget handle normal typing
+                fn()
+            return handler
+
+        bindings = {
+            "<space>":      self.toggle_live,
+            "a":            self.auto_frame,
+            "A":            self.auto_frame,
+            "s":            self.single_trigger,
+            "S":            self.single_trigger,
+            "c":            self.download_waveform,
+            "C":            self.download_waveform,
+            "z":            self.zoom_out,
+            "Z":            self.zoom_out,
+            "r":            self.save_ref_trace,
+            "R":            self.save_ref_trace,
+            "<Escape>":     self.clear_cursors,
+            "<F5>":         self.plot_waveform,
+        }
+        for key, fn in bindings.items():
+            self.root.bind(key, _guard(fn))
 
     def close_panel(self):
         self._clock_running = False

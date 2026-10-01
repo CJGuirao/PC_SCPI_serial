@@ -354,6 +354,9 @@ class ViewsMixin:
                 if len(buf[name]) > 1:
                     y = np.mean(np.stack(list(buf[name])), axis=0)
 
+            # Feed persistence buffer with the pre-average live frame.
+            self._push_persist(name, y)
+
             per_channel_xy.append((name, color, x, y))
             plotted = True
             drawn_low = float(np.min(y)) if drawn_low is None else min(drawn_low, float(np.min(y)))
@@ -411,11 +414,13 @@ class ViewsMixin:
             getattr(self, "_zoom_ylim", None),
             getattr(self, "_ref_trace", None) is not None,
             getattr(self, "_avg_depth", 1),
+            getattr(self, "_persist_depth", 0),
         )
         fast_path = (
             plotted
             and framing is not None
             and getattr(self, "_plot_frame_key", None) == frame_key
+            and getattr(self, "_persist_depth", 0) == 0   # persistence always redraws
         )
 
         if fast_path:
@@ -447,6 +452,7 @@ class ViewsMixin:
                 for _name, color, x, y in per_channel_xy:
                     line, = self.ax.plot(x, y, color=color, linewidth=1.4)
                     self._dynamic_artists.append(line)
+                self.draw_persist_traces(per_channel_xy)
                 self.show_graticule(framing, window, unit, factor)
                 # Apply zoom limits if the user has dragged a rectangle.
                 xlim = getattr(self, "_zoom_xlim", None)
@@ -711,6 +717,60 @@ class ViewsMixin:
                                   xytext=(3, 0), textcoords="offset points",
                                   va="center")
         self._ref_trace_artists = [line, annot]
+
+    # ------------------------------------------------------------------
+    # Persistence (digital phosphor)
+    def set_persist_depth(self, depth):
+        """Set how many old frames to ghost behind the live trace. 0 = off."""
+        from collections import deque
+        self._persist_depth = max(0, int(depth))
+        if self._persist_depth == 0:
+            self._persist_buf = {}
+        self.log("Persistence: %d frame%s" % (
+            self._persist_depth, "" if self._persist_depth == 1 else "s"))
+
+    def clear_persist_buf(self):
+        """Discard all ghosted frames."""
+        self._persist_buf = {}
+        self._plot_frame_key = None
+        self.plot_waveform()
+
+    def _push_persist(self, channel_name, y):
+        """Add the current frame to the persistence buffer for one channel."""
+        from collections import deque
+        depth = getattr(self, "_persist_depth", 0)
+        if depth == 0:
+            return
+        buf = getattr(self, "_persist_buf", {})
+        if channel_name not in buf:
+            buf[channel_name] = deque(maxlen=depth)
+        buf[channel_name].append(y.copy())
+        self._persist_buf = buf
+
+    def draw_persist_traces(self, per_channel_xy):
+        """Draw dimmed ghost traces from the persistence buffer."""
+        depth = getattr(self, "_persist_depth", 0)
+        if depth == 0:
+            return
+        buf = getattr(self, "_persist_buf", {})
+        if not buf:
+            return
+        palette = {
+            "CH1": "#9cdc9c", "CH2": "#7bd6ff",
+        }
+        for name, _color, x, _y in per_channel_xy:
+            frames = buf.get(name)
+            if not frames:
+                continue
+            color = palette.get(name, "#9cdc9c")
+            n = len(frames)
+            for i, old_y in enumerate(frames):
+                # Oldest frame → most transparent; newest → least.
+                alpha = 0.08 + 0.30 * (i / max(n - 1, 1))
+                if old_y.size != x.size:
+                    continue
+                self.ax.plot(x, old_y, color=color, linewidth=0.8,
+                             alpha=alpha, zorder=0)
 
     # ------------------------------------------------------------------
     # Zoom
