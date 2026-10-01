@@ -265,6 +265,7 @@ class ModernLabUI:
         _dkey(row2, "SETUP",   self.open_setup)
         _dkey(row2, "OPEN",    self.open_capture)
         _dkey(row2, "SAVE",    self.save_waveform)
+        _dkey(row2, "IMG",     self.save_plot_image)
         _dkey(row2, "CONSOLE", self.open_console)
 
         ttk.Label(controls, text="Knobs: drag • wheel • arrow keys",
@@ -1336,6 +1337,10 @@ class ModernLabUI:
         tk.Checkbutton(peaks, text="Log frequency", variable=self.fft_log, bg=PANEL, fg=INK,
                        selectcolor=PANEL, activebackground=PANEL,
                        command=lambda: self.set_fft_option("log", self.fft_log.get())).pack(side="left")
+        self.fft_thd = tk.BooleanVar(value=bool(self._fft_options.get("thd")))
+        tk.Checkbutton(peaks, text="THD", variable=self.fft_thd, bg=PANEL, fg=INK,
+                       selectcolor=PANEL, activebackground=PANEL,
+                       command=lambda: self.set_fft_option("thd", self.fft_thd.get())).pack(side="left", padx=(8, 0))
         self.key(peaks, "PEAKS", self.report_peaks).pack(side="left", padx=6)
 
         maths = ttk.Frame(parent, padding=(8, 4, 8, 4))
@@ -1444,6 +1449,26 @@ class ModernLabUI:
 
         # Separator
         ttk.Separator(parent, orient="vertical").pack(side="left", fill="y", padx=8, pady=4)
+
+        # PASS / FAIL MASK
+        mask_frame = ttk.Frame(parent, padding=(8, 4, 8, 4))
+        mask_frame.pack(side="left", anchor="n", padx=6)
+        ttk.Label(mask_frame, text="PASS / FAIL",
+                  font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        tol_row = ttk.Frame(mask_frame)
+        tol_row.pack(anchor="w", pady=(4, 2))
+        ttk.Label(tol_row, text="Tolerance %").pack(side="left", padx=(0, 4))
+        self.mask_tol_var = tk.StringVar(value="10")
+        ttk.Entry(tol_row, textvariable=self.mask_tol_var, width=5).pack(side="left")
+        self.key(mask_frame, "SET MASK",
+                 lambda: self.save_mask(float(self.mask_tol_var.get() or 10)),
+                 color="#9cdc9c").pack(fill="x", pady=(4, 1))
+        self.key(mask_frame, "CLEAR MASK", self.clear_mask,
+                 color="#444c4e").pack(fill="x", pady=1)
+        self.mask_status_var = tk.StringVar(value="No mask")
+        tk.Label(mask_frame, textvariable=self.mask_status_var,
+                 bg=PANEL, fg="#9cdc9c", font=("Consolas", 8),
+                 wraplength=110, justify="left").pack(anchor="w", pady=(4, 0))
 
         # PROTOCOL DECODE
         proto_frame = ttk.Frame(parent, padding=(8, 4, 8, 4))
@@ -1696,6 +1721,15 @@ class ModernLabUI:
             # round trips, and the next frame must not queue behind them.
             self.refresh_cursors()
             self.plot_waveform()
+            # Accumulate measurement statistics from every live frame so the
+            # stats table in the MEASURE tab updates continuously without the
+            # user having to press READ.
+            try:
+                trace = self.scope.frame_from_trace(1)
+                if isinstance(trace, dict) and trace:
+                    self._accum_meas_stats(trace)
+            except Exception:
+                pass
             # Unattended recording, if it is on: one file per frame, written from
             # the worker so the disk does not hold up the drawing.
             self.record_capture()

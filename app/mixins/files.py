@@ -81,6 +81,39 @@ class FilesMixin:
         self.log("SCPI %s \u2192 %s" % (command, answer or "(no reply)"))
         self.console_reply(answer or "(no reply)")
 
+    def save_plot_image(self):
+        """Save the current plot as a timestamped PNG in the record folder (or home).
+
+        No dialog — one click, one file.  The filename embeds the date and time
+        so repeated saves never clobber each other.
+        """
+        import time, os
+        folder = (getattr(self.setup, "record_folder", "") or "").strip()
+        if not folder:
+            folder = os.path.expanduser("~")
+        os.makedirs(folder, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        path = os.path.join(folder, "scope-%s.png" % stamp)
+        try:
+            # Include cursor readout as a caption when cursors are placed.
+            cursor_line = ""
+            if hasattr(self, "cursor_text"):
+                cursor_line = self.cursor_text.get()
+            # Add the caption as a suptitle below the plot.
+            if cursor_line and "none placed" not in cursor_line.lower():
+                self.fig.suptitle(cursor_line, fontsize=7,
+                                  color="#9cf0c9", y=0.01, va="bottom")
+            self.fig.savefig(path, dpi=150, bbox_inches="tight",
+                             facecolor=self.fig.get_facecolor())
+            self.fig.suptitle("")        # clear the temporary caption
+            self.canvas.draw_idle()
+        except Exception as exc:
+            self.log("Image export failed: %s" % exc, "ERROR")
+            messagebox.showerror("Export image", "Could not save image:\n%s" % exc)
+            return
+        self.log("Plot saved: %s" % path)
+        self.status_var.set("Saved: %s" % os.path.basename(path))
+
     def save_waveform(self):
         """Write the capture in whichever format the chosen filename asks for.
 

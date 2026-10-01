@@ -425,3 +425,74 @@ def describe_cursors(reading):
         if entry.get("dv") is not None:
             parts.append("%s Δ %s" % (name, format_volts(entry["dv"])))
     return "Cursors: " + (", ".join(parts) if parts else "one marker placed.")
+
+
+def harmonic_analysis(spectrum, max_harmonics=8):
+    """Find the fundamental + harmonics and compute THD.
+
+    Parameters
+    ----------
+    spectrum : dict
+        From ``fft_spectrum()``.
+    max_harmonics : int
+        How many harmonics above the fundamental to look for (default 8).
+
+    Returns
+    -------
+    dict with keys:
+        fundamental   – {frequency, amplitude, value, index}
+        harmonics     – list of {n, frequency, amplitude, value, found}
+                        n=2 is the second harmonic (2f), etc.
+        thd_pct       – Total Harmonic Distortion as a percentage
+        thd_db        – THD in dB (20·log10(THD/100))
+        unit          – magnitude unit string from the spectrum
+    Returns None when no clear fundamental is found.
+    """
+    if not spectrum:
+        return None
+    amplitudes = spectrum.get("amplitudes")
+    freqs = spectrum.get("frequencies")
+    if amplitudes is None or freqs is None or amplitudes.size < 4:
+        return None
+
+    # Fundamental = the largest peak above DC (index 0).
+    peaks = spectrum_peaks(spectrum, count=1, floor_ratio=0.01)
+    if not peaks:
+        return None
+    fund = peaks[0]
+    f0 = fund["frequency"]
+    a0 = fund["amplitude"]
+
+    if f0 <= 0 or a0 <= 0:
+        return None
+
+    # For each harmonic order n, find the bin nearest n*f0 and record amplitude.
+    harmonics = []
+    sum_sq = 0.0
+    for n in range(2, max_harmonics + 2):
+        target = n * f0
+        if target > float(freqs[-1]):
+            break
+        idx = int(np.argmin(np.abs(freqs - target)))
+        a_n = float(amplitudes[idx])
+        v_n = float(spectrum["values"][idx])
+        sum_sq += a_n ** 2
+        harmonics.append({
+            "n": n,
+            "frequency": float(freqs[idx]),
+            "amplitude": a_n,
+            "value": v_n,
+            "found": a_n > a0 * 0.005,   # at least 0.5 % of fundamental
+        })
+
+    thd = (np.sqrt(sum_sq) / a0) * 100.0 if a0 > 0 else 0.0
+    import math
+    thd_db = 20.0 * math.log10(thd / 100.0) if thd > 0 else -float("inf")
+
+    return {
+        "fundamental": fund,
+        "harmonics": harmonics,
+        "thd_pct": float(thd),
+        "thd_db": float(thd_db),
+        "unit": spectrum.get("unit", "dBV"),
+    }

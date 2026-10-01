@@ -92,6 +92,38 @@ class ViewsMixin:
                              xy=(peak["frequency"], peak["value"]),
                              xytext=(4, 4), textcoords="offset points",
                              color=palette["math"], fontsize=8, fontweight="bold")
+
+        # Harmonic analysis + THD (when enabled in ANALYSE options).
+        if options.get("thd"):
+            ha = analysis.harmonic_analysis(spectrum)
+            if ha:
+                f0 = ha["fundamental"]["frequency"]
+                # Mark fundamental with a triangle.
+                self.ax.annotate(
+                    "F  %s" % analysis.format_hz(f0),
+                    xy=(f0, ha["fundamental"]["value"]),
+                    xytext=(6, 8), textcoords="offset points",
+                    color="#ffd166", fontsize=8, fontweight="bold",
+                    arrowprops=dict(arrowstyle="-", color="#ffd166", lw=0.8))
+                # Mark each found harmonic.
+                for h in ha["harmonics"]:
+                    if not h["found"]:
+                        continue
+                    self.ax.annotate(
+                        "%dH" % h["n"],
+                        xy=(h["frequency"], h["value"]),
+                        xytext=(4, 4), textcoords="offset points",
+                        color="#ff7b72", fontsize=7, fontweight="bold")
+                # THD box in the upper-right corner.
+                thd_text = "THD = %.2f %%  (%.1f dB)" % (ha["thd_pct"], ha["thd_db"])
+                self.ax.text(0.98, 0.96, thd_text,
+                             transform=self.ax.transAxes,
+                             ha="right", va="top",
+                             fontsize=9, fontweight="bold",
+                             color="#ffd166",
+                             bbox=dict(boxstyle="round,pad=0.3",
+                                       facecolor="#1a2020", edgecolor="#ffd166",
+                                       alpha=0.85))
         self.ax.set_xlabel("Frequency (Hz)", color=palette["text"], fontsize=9)
         self.ax.set_ylabel("Magnitude (%s)" % spectrum["unit"], color=palette["text"], fontsize=9)
         self.ax.set_title("%s \u2022 %s window \u2022 %s \u2022 Nyquist %s \u2022 %.4g Hz/bin"
@@ -421,6 +453,7 @@ class ViewsMixin:
             and framing is not None
             and getattr(self, "_plot_frame_key", None) == frame_key
             and getattr(self, "_persist_depth", 0) == 0   # persistence always redraws
+            and getattr(self, "_mask", None) is None        # mask always redraws
         )
 
         if fast_path:
@@ -453,6 +486,10 @@ class ViewsMixin:
                     line, = self.ax.plot(x, y, color=color, linewidth=1.4)
                     self._dynamic_artists.append(line)
                 self.draw_persist_traces(per_channel_xy)
+                # Pass/Fail mask (first channel only).
+                if per_channel_xy and getattr(self, "_mask", None) is not None:
+                    _nm, _col, mx, my = per_channel_xy[0]
+                    self.draw_mask(mx, my)
                 self.show_graticule(framing, window, unit, factor)
                 # Apply zoom limits if the user has dragged a rectangle.
                 xlim = getattr(self, "_zoom_xlim", None)
@@ -935,3 +972,98 @@ class ViewsMixin:
                 annotation_clip=True,
             )
             self._proto_artists.append(ann)
+
+    # ------------------------------------------------------------------
+    # Pass / Fail mask
+    def save_mask(self, tolerance_pct=10.0):
+        """Build an envelope from the current capture and store it as the mask.
+
+        The upper band is the trace + tolerance% of Vpp; the lower band is
+        the trace - that same margin.  tolerance_pct comes from the UI spinner.
+        """
+        channels = self.capture_channels()
+        for channel in channels:
+            y = np.asarray(channel.get("waveform", []), dtype=float)
+            if y.size == 0:
+                continue
+            number = self.channel_number(channel)
+            if number:
+                y = y * self.display_ratio(number, channel)
+                y = y + self.display_offset(number)
+            interval = float(channel.get("point_interval", 0) or 0)
+            factor, _unit = self.time_axis_units(interval * (y.size - 1)) if interval and y.size else (1.0, "s")
+            x = np.arange(y.size, dtype=float) * interval * factor
+            margin = (np.max(y) - np.min(y)) * tolerance_pct / 100.0
+            self._mask = (x, y - margin, y + margin)
+            self._mask_pass = 0
+            self._mask_fail = 0
+            self._plot_frame_key = None
+            vpp = float(np.max(y) - np.min(y))
+            self.log("Mask saved: ±%.1f %% (±%s) of %.3g V pk-pk" % (
+                tolerance_pct, analysis.format_volts(margin), vpp))
+            if hasattr(self, "mask_status_var"):
+                self.mask_status_var.set("Mask active  P:0  F:0")
+            self.plot_waveform()
+            break
+
+    def clear_mask(self):
+        """Remove the pass/fail mask."""
+        self._mask = None
+        self._mask_pass = 0
+        self._mask_fail = 0
+        self._plot_frame_key = None
+        self.log("Mask cleared.")
+        if hasattr(self, "mask_status_var"):
+            self.mask_status_var.set("No mask")
+        self.plot_waveform()
+
+    def test_mask(self, x, y):
+        """Test a (x, y) trace against the stored mask. Returns True=pass."""
+        mask = getattr(self, "_mask", None)
+        if mask is None:
+            return True
+        mx, y_lo, y_hi = mask
+        # Interpolate the mask to the trace's x positions.
+        y_lo_i = np.interp(x, mx, y_lo, left=y_lo[0], right=y_lo[-1])
+        y_hi_i = np.interp(x, mx, y_hi, left=y_hi[0], right=y_hi[-1])
+        return bool(np.all(y >= y_lo_i) and np.all(y <= y_hi_i))
+
+    def draw_mask(self, x, y):
+        """Draw the mask envelope and colour the trace based on pass/fail."""
+        mask = getattr(self, "_mask", None)
+        if mask is None:
+            return
+        mx, y_lo, y_hi = mask
+        # Interpolate to trace x axis.
+        y_lo_i = np.interp(x, mx, y_lo, left=y_lo[0], right=y_lo[-1])
+        y_hi_i = np.interp(x, mx, y_hi, left=y_hi[0], right=y_hi[-1])
+        passed = bool(np.all(y >= y_lo_i) and np.all(y <= y_hi_i))
+
+        # Update counters.
+        if passed:
+            self._mask_pass = getattr(self, "_mask_pass", 0) + 1
+        else:
+            self._mask_fail = getattr(self, "_mask_fail", 0) + 1
+
+        # Draw the envelope as a filled band.
+        self.ax.fill_between(x, y_lo_i, y_hi_i,
+                             alpha=0.12, color="#9cdc9c", zorder=1)
+        self.ax.plot(x, y_lo_i, color="#9cdc9c", linewidth=0.7,
+                     linestyle="--", alpha=0.6, zorder=2)
+        self.ax.plot(x, y_hi_i, color="#9cdc9c", linewidth=0.7,
+                     linestyle="--", alpha=0.6, zorder=2)
+
+        # Status badge.
+        p = getattr(self, "_mask_pass", 0)
+        f = getattr(self, "_mask_fail", 0)
+        badge_color = "#9cdc9c" if passed else "#ff7b72"
+        badge_text = "PASS  P:%d  F:%d" % (p, f) if passed else "FAIL  P:%d  F:%d" % (p, f)
+        self.ax.text(0.02, 0.97, badge_text,
+                     transform=self.ax.transAxes,
+                     ha="left", va="top", fontsize=9, fontweight="bold",
+                     color=badge_color,
+                     bbox=dict(boxstyle="round,pad=0.3",
+                               facecolor="#101719", edgecolor=badge_color,
+                               alpha=0.9))
+        if hasattr(self, "mask_status_var"):
+            self.mask_status_var.set(badge_text)

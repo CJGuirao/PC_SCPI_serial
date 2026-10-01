@@ -153,6 +153,12 @@ class App(ConnectionMixin, ControlsMixin, DmmMixin, FramingMixin, ViewsMixin, Re
         self._persist_buf = {}      # {channel_name: deque of np.ndarray}
         #: How many old frames to keep (0 = off).
         self._persist_depth = 0
+        # --- Pass/Fail mask ---
+        #: (x, y_lo, y_hi) arrays defining the envelope, or None.
+        self._mask = None
+        #: Running counters for live mask testing.
+        self._mask_pass = 0
+        self._mask_fail = 0
 
         self.setup_gui()
         self._bind_keys()
@@ -376,6 +382,8 @@ class App(ConnectionMixin, ControlsMixin, DmmMixin, FramingMixin, ViewsMixin, Re
             "Z":            self.zoom_out,
             "r":            self.save_ref_trace,
             "R":            self.save_ref_trace,
+            "i":            self.save_plot_image,
+            "I":            self.save_plot_image,
             "<Escape>":     self.clear_cursors,
             "<F5>":         self.plot_waveform,
         }
