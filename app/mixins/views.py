@@ -62,6 +62,11 @@ class ViewsMixin:
         the plot, because a spectrum drawn from 20 us samples invites reading
         meaning into frequencies it never saw.
         """
+        self.ax.clear()
+        # Switching away from time view must force a full graticule rebuild
+        # when time view is next drawn (the fast path would reuse stale artists).
+        self._plot_frame_key = None
+        self._dynamic_artists = []
         palette = self.palette()
         self.ax.set_facecolor(palette["face"])
         self.ax.grid(True, which="major", color=palette["grid"], alpha=0.35, linestyle=":")
@@ -98,6 +103,9 @@ class ViewsMixin:
 
     def plot_math(self):
         """One trace computed from two: the vendor's Mathematics panel, in our own frame."""
+        self.ax.clear()
+        self._plot_frame_key = None
+        self._dynamic_artists = []
         palette = self.palette()
         self.ax.set_facecolor(palette["face"])
         self.ax.grid(True, which="major", color=palette["grid"], alpha=0.35, linestyle=":")
@@ -140,6 +148,9 @@ class ViewsMixin:
         It needs two channels at once, which is why it says so rather than drawing
         an empty frame when only one is available.
         """
+        self.ax.clear()
+        self._plot_frame_key = None
+        self._dynamic_artists = []
         palette = self.palette()
         self.ax.set_facecolor(palette["face"])
         self.ax.grid(True, which="major", color=palette["grid"], alpha=0.35, linestyle=":")
