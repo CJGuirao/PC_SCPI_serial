@@ -203,6 +203,9 @@ class ViewsMixin:
     def update_cursor_readout(self):
         """Say what the markers measure, including the level of each trace at them."""
         cursors = getattr(self, "_cursors", {}) or {}
+        if getattr(self, "_view", "time") == "fft":
+            self._update_fft_cursor_readout(cursors)
+            return {}
         reading = analysis.cursor_readings(self.analysis_traces(),
                                           vertical_times=(cursors.get("t1"), cursors.get("t2")),
                                           horizontal_volts=(cursors.get("v1"), cursors.get("v2")))
@@ -215,6 +218,62 @@ class ViewsMixin:
         if hasattr(self, "cursor_text"):
             self.cursor_text.set(line)
         return reading
+
+    def _update_fft_cursor_readout(self, cursors):
+        """Cursor readout for FFT view: frequency + magnitude at each marker."""
+        import numpy as np
+        f1 = cursors.get("t1")
+        f2 = cursors.get("t2")
+        m1 = cursors.get("v1")
+        m2 = cursors.get("v2")
+        if f1 is None and f2 is None and m1 is None and m2 is None:
+            if hasattr(self, "cursor_text"):
+                self.cursor_text.set("Cursors: none placed.")
+            return
+        channel = self.analysis_channel()
+        options = getattr(self, "_fft_options", {})
+        spectrum = analysis.fft_spectrum(channel,
+                                         window=options.get("window", "hanning"),
+                                         fmt=options.get("format", "dBV"))
+        unit = (spectrum or {}).get("unit", "dBV") if spectrum else "dBV"
+        parts = []
+        # Frequency cursors (vertical lines F1, F2)
+        def mag_at(freq):
+            if spectrum is None:
+                return None
+            freqs = spectrum["frequencies"]
+            vals = spectrum["values"]
+            if freqs is None or vals is None or len(freqs) == 0:
+                return None
+            idx = int(np.argmin(np.abs(freqs - freq)))
+            return float(vals[idx])
+        if f1 is not None:
+            mag = mag_at(f1)
+            s = "F1 %s" % analysis.format_hz(f1)
+            if mag is not None:
+                s += " (%.3g %s)" % (mag, unit)
+            parts.append(s)
+        if f2 is not None:
+            mag = mag_at(f2)
+            s = "F2 %s" % analysis.format_hz(f2)
+            if mag is not None:
+                s += " (%.3g %s)" % (mag, unit)
+            parts.append(s)
+        if f1 is not None and f2 is not None:
+            delta = abs(f2 - f1)
+            parts.append("\u0394F %s" % analysis.format_hz(delta))
+            if delta > 0:
+                parts.append("1/\u0394F %s" % analysis.format_seconds(1.0 / delta))
+        # Magnitude cursors (horizontal lines M1, M2)
+        if m1 is not None:
+            parts.append("M1 %.3g %s" % (m1, unit))
+        if m2 is not None:
+            parts.append("M2 %.3g %s" % (m2, unit))
+        if m1 is not None and m2 is not None:
+            parts.append("\u0394M %.3g %s" % (abs(m2 - m1), unit))
+        line = "   ".join(parts) if parts else "Cursors: none placed."
+        if hasattr(self, "cursor_text"):
+            self.cursor_text.set(line)
 
     def report_peaks(self):
         """Put the spectrum's peaks in the log, with the limits they were found under."""

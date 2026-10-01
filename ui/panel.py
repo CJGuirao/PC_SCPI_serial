@@ -76,8 +76,15 @@ PALETTES = {
               "trace1": "#111111", "trace2": "#555555", "math": "#777777"},
 }
 
-#: The horizontal cursors are the two the analysis layer can read a difference from.
+#: Cursor button labels per view. t1/t2 are the x-axis (vertical line) markers;
+#: v1/v2 are the y-axis (horizontal line) markers.
 CURSOR_TARGETS = (("t1", "V1"), ("t2", "V2"), ("v1", "H1"), ("v2", "H2"))
+
+#: How cursors are labelled in each view.
+CURSOR_LABELS = {
+    "time": {"t1": "V1", "t2": "V2", "v1": "H1", "v2": "H2"},
+    "fft":  {"t1": "F1", "t2": "F2", "v1": "M1", "v2": "M2"},
+}
 
 #: How close, in pixels, a press has to be to pick up a marker rather than place one.
 CURSOR_GRAB_PIXELS = 9.0
@@ -973,6 +980,19 @@ class ModernLabUI:
             active = (name == getattr(self, "_view", "time"))
             button.configure(bg=("#f1f3ed" if active else "#444c4e"),
                              fg=(INK if active else "#f1f3ed"))
+        # Relabel cursor buttons to match the current view.
+        self._refresh_cursor_labels()
+
+    def _refresh_cursor_labels(self):
+        """Update cursor button text for the current view (time or FFT)."""
+        view = getattr(self, "_view", "time")
+        labels = CURSOR_LABELS.get(view, CURSOR_LABELS["time"])
+        for key_name, button in (getattr(self, "_cursor_buttons", None) or {}).items():
+            label = labels.get(key_name, key_name.upper())
+            try:
+                button.configure(text=label)
+            except Exception:
+                pass
 
     def palette(self):
         """The colours the plot draws in, by name."""
@@ -1102,20 +1122,31 @@ class ModernLabUI:
         colours = {"t1": "#9cdc9c", "t2": "#9cdc9c", "v1": "#ffb86b", "v2": "#ffb86b"}
         self._cursor_artists = {}
         self._cursor_annots = []
+        view = getattr(self, "_view", "time")
+        labels_map = CURSOR_LABELS.get(view, CURSOR_LABELS["time"])
+        is_fft = (view == "fft")
         for which, value in (self._cursors or {}).items():
             if value is None:
                 continue
+            btn_label = labels_map.get(which, which.upper())
             if which in ("t1", "t2"):
                 artist = self.ax.axvline(value, color=colours[which], linewidth=1.1,
                                          linestyle="--", alpha=0.95)
-                label = "%s %s" % (which.upper(), analysis.format_seconds(value))
+                if is_fft:
+                    label = "%s %s" % (btn_label, analysis.format_hz(value))
+                else:
+                    label = "%s %s" % (btn_label, analysis.format_seconds(value))
                 annot = self.ax.annotate(label, xy=(value, 1.0), xycoords=("data", "axes fraction"),
                                  xytext=(3, -10), textcoords="offset points",
                                  color=colours[which], fontsize=8, fontweight="bold")
             else:
                 artist = self.ax.axhline(value, color=colours[which], linewidth=1.1,
                                          linestyle="--", alpha=0.95)
-                label = "%s %s" % (which.upper(), analysis.format_volts(value))
+                # In FFT view magnitude markers show the unit from the plot y-axis.
+                if is_fft:
+                    label = "%s %.3g" % (btn_label, value)
+                else:
+                    label = "%s %s" % (btn_label, analysis.format_volts(value))
                 annot = self.ax.annotate(label, xy=(0.0, value), xycoords=("axes fraction", "data"),
                                  xytext=(4, 0), textcoords="offset points",
                                  color=colours[which], fontsize=8, fontweight="bold")
