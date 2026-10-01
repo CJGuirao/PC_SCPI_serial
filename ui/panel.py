@@ -220,7 +220,6 @@ class ModernLabUI:
         # AUTO is the front panel's autoset: find the signal and frame it.
         self.key(acq, "AUTO", self.auto_frame, color="#9cd4e8").pack(side="left", expand=True, fill="x", padx=3)
         self.key(acq, "SINGLE", self.single_trigger).pack(side="left", expand=True, fill="x", padx=3)
-        self.key(acq, "RUN/STOP", self.toggle_run_stop, color="#c8e8a8").pack(side="left", expand=True, fill="x", padx=3)
         ttk.Label(controls, text="Knobs: drag • wheel • arrow keys",
                   foreground="#626968").grid(row=3, column=0, columnspan=2, pady=(9, 0))
 
@@ -838,6 +837,9 @@ class ModernLabUI:
             if self._live_timer:
                 self.root.after_cancel(self._live_timer)
                 self._live_timer = None
+            # Pause the instrument too so its screen freezes with the software.
+            if self._is_connected():
+                self.ask_scope("run_stop", lambda scope: scope.run(False))
         elif self.ready():
             self.auto_refresh_var.set(True)
             self.update_live_button()
@@ -845,6 +847,8 @@ class ModernLabUI:
             # whatever the previous run happened to average.
             self._live_period = None
             self._live_frames = 0
+            # Resume the instrument before asking for the first frame.
+            self.ask_scope("run_stop", lambda scope: scope.run(True))
             self.download_waveform()
 
     def start_worker(self, worker, label):

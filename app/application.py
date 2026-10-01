@@ -211,10 +211,6 @@ class App(ConnectionMixin, ControlsMixin, DmmMixin, FramingMixin, ViewsMixin, Re
             return
         self.log("Instrument %s" % new_state)
         self.status_var.set("Instrument %s" % new_state)
-        # A STOP keeps the last live frame on screen; a RUN restarts the live loop
-        # if it was already running, so new frames appear without pressing LIVE again.
-        if new_state == "RUN" and self.auto_refresh_var.get():
-            self.download_waveform()
 
     def last_capture_amplitude(self):
         """The peak-to-peak of the last capture as the app shows it, in volts.
