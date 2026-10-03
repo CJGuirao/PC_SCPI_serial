@@ -143,3 +143,112 @@ class FilesMixin:
             return
         self.log("Saved %s" % described)
         messagebox.showinfo("Save capture", "Saved:\n%s\n\n%s" % (path, described))
+
+
+    # ------------------------------------------------------------------
+    # Scope presets — save/recall full panel configuration by name
+    # ------------------------------------------------------------------
+
+    def _preset_state(self):
+        """Snapshot every writable panel setting as a plain dict."""
+        import tkinter as tk
+        state = {}
+        # Collect all tkinter StringVar / BooleanVar widgets by attribute name.
+        for attr in dir(self):
+            if attr.startswith("_"):
+                continue
+            obj = getattr(self, attr, None)
+            if isinstance(obj, (tk.StringVar, tk.BooleanVar)):
+                try:
+                    state[attr] = obj.get()
+                except Exception:
+                    pass
+        return state
+
+    def _apply_preset_state(self, state):
+        """Restore panel settings from a previously snapshotted dict."""
+        import tkinter as tk
+        for attr, value in state.items():
+            obj = getattr(self, attr, None)
+            if isinstance(obj, (tk.StringVar, tk.BooleanVar)):
+                try:
+                    obj.set(value)
+                except Exception:
+                    pass
+
+    def save_preset(self, name=None):
+        """Save the current panel state under a name (prompted if not given)."""
+        import tkinter.simpledialog as sd
+        if not name:
+            name = sd.askstring("Save preset",
+                                "Preset name (letters, digits, spaces):",
+                                parent=self.root)
+        if not name:
+            return
+        name = name.strip()[:32]
+        presets = getattr(self, "_presets", {})
+        presets[name] = self._preset_state()
+        self._presets = presets
+        self._persist_presets()
+        self._refresh_preset_list()
+        self.log("Preset '%s' saved (%d settings)." % (name, len(presets[name])))
+
+    def recall_preset(self, name):
+        """Restore a named preset."""
+        presets = getattr(self, "_presets", {})
+        state = presets.get(name)
+        if not state:
+            self.log("Preset '%s' not found." % name, "WARNING")
+            return
+        self._apply_preset_state(state)
+        self.log("Preset '%s' recalled." % name)
+
+    def delete_preset(self, name):
+        """Remove a preset by name."""
+        presets = getattr(self, "_presets", {})
+        if name in presets:
+            del presets[name]
+            self._presets = presets
+            self._persist_presets()
+            self._refresh_preset_list()
+            self.log("Preset '%s' deleted." % name)
+
+    def _persist_presets(self):
+        """Write presets alongside the bench setup JSON."""
+        import json, os
+        try:
+            path = getattr(self.setup, "path", None)
+            if not path:
+                return
+            preset_path = str(path).replace(".json", "_presets.json")
+            with open(preset_path, "w", encoding="utf-8") as f:
+                json.dump(self._presets, f, indent=2)
+        except Exception as exc:
+            self.log("Could not persist presets: %s" % exc, "WARNING")
+
+    def load_presets(self):
+        """Load presets from disk next to the bench setup file."""
+        import json
+        try:
+            path = getattr(self.setup, "path", None)
+            if not path:
+                return
+            preset_path = str(path).replace(".json", "_presets.json")
+            with open(preset_path, encoding="utf-8") as f:
+                self._presets = json.load(f)
+            self.log("Loaded %d preset(s)." % len(self._presets))
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            self.log("Could not load presets: %s" % exc, "WARNING")
+
+    def _refresh_preset_list(self):
+        """Update the preset Combobox in the UTILITY drawer if it exists."""
+        presets = getattr(self, "_presets", {})
+        widget = getattr(self, "preset_box", None)
+        if widget is not None:
+            try:
+                names = sorted(presets.keys())
+                widget.configure(values=names)
+            except Exception:
+                pass

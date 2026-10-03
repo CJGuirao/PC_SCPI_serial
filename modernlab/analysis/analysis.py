@@ -496,3 +496,219 @@ def harmonic_analysis(spectrum, max_harmonics=8):
         "thd_db": float(thd_db),
         "unit": spectrum.get("unit", "dBV"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Extended waveform measurements — all computed from the decoded samples
+# ---------------------------------------------------------------------------
+
+def _threshold_crossings_idx(v, level):
+    """Indices of rising and falling threshold crossings (sub-sample resolution)."""
+    above = v >= level
+    rising  = np.where(~above[:-1] &  above[1:])[0]
+    falling = np.where( above[:-1] & ~above[1:])[0]
+    def interp(idxs, direction):
+        out = []
+        for i in idxs:
+            d = v[i+1] - v[i]
+            frac = (level - v[i]) / d if d else 0.0
+            out.append(i + frac)
+        return np.array(out)
+    return interp(rising, "rise"), interp(falling, "fall")
+
+
+def waveform_measurements(channel):
+    """Compute the full suite of waveform measurements from one channel dict.
+
+    Returns a flat dict; every value is a float (or None when not measurable).
+    Keys: vpp, vmax, vmin, vmean, vrms, vamp, vtop, vbase,
+          frequency, period, duty_pct, width_pos, width_neg,
+          rise_time, fall_time, overshoot_pct, undershoot_pct.
+
+    Works entirely from the decoded samples + point_interval — no SCPI queries.
+    """
+    v = samples(channel)
+    dt = point_interval(channel)
+    if v.size < 8 or dt <= 0:
+        return {}
+
+    vmax = float(np.max(v))
+    vmin = float(np.min(v))
+    vpp  = vmax - vmin
+    vmean = float(np.mean(v))
+    vrms  = float(np.sqrt(np.mean(v**2)))
+
+    # Top / base via histogram: signal dwells at two levels; find the two modes.
+    hist, edges = np.histogram(v, bins=64)
+    centers = (edges[:-1] + edges[1:]) / 2.0
+    # Simple 3-point moving average to smooth the histogram (no scipy needed).
+    smoothed = np.convolve(hist.astype(float), [1/3, 1/3, 1/3], mode='same')
+    # Local peaks: find bins higher than both neighbours.
+    is_peak = (smoothed[1:-1] > smoothed[:-2]) & (smoothed[1:-1] > smoothed[2:])
+    peak_idxs = np.where(is_peak)[0] + 1
+    # Filter to peaks with amplitude >= 10 % of histogram maximum.
+    peak_idxs = peak_idxs[smoothed[peak_idxs] >= smoothed.max() * 0.10]
+    if len(peak_idxs) >= 2:
+        vtop  = float(centers[peak_idxs[-1]])
+        vbase = float(centers[peak_idxs[0]])
+    else:
+        vtop  = vmax
+        vbase = vmin
+    vamp = vtop - vbase
+
+    # 10 % / 90 % thresholds for rise/fall time
+    lo10 = vbase + 0.10 * vamp
+    hi90 = vbase + 0.90 * vamp
+    mid50 = vbase + 0.50 * vamp
+
+    # Crossings at 50 % for period/frequency/duty
+    rises50, falls50 = _threshold_crossings_idx(v, mid50)
+
+    period = None
+    frequency = None
+    duty_pct = None
+    width_pos = None
+    width_neg = None
+
+    if rises50.size >= 2:
+        periods = np.diff(rises50) * dt
+        period = float(np.median(periods))
+        frequency = 1.0 / period if period > 0 else None
+
+    if rises50.size >= 1 and falls50.size >= 1:
+        # Width of positive pulse: next fall after each rise
+        widths_pos = []
+        widths_neg = []
+        for r in rises50:
+            nf = falls50[falls50 > r]
+            if nf.size:
+                widths_pos.append((nf[0] - r) * dt)
+        for f in falls50:
+            nr = rises50[rises50 > f]
+            if nr.size:
+                widths_neg.append((nr[0] - f) * dt)
+        if widths_pos:
+            width_pos = float(np.median(widths_pos))
+        if widths_neg:
+            width_neg = float(np.median(widths_neg))
+        if width_pos and period:
+            duty_pct = (width_pos / period) * 100.0
+
+    # Rise time: 10 % → 90 % on first complete rising edge
+    rise_time = None
+    fall_time = None
+    if vamp > 0:
+        rises10, _  = _threshold_crossings_idx(v, lo10)
+        rises90, _  = _threshold_crossings_idx(v, hi90)
+        _, falls10  = _threshold_crossings_idx(v, lo10)
+        _, falls90  = _threshold_crossings_idx(v, hi90)
+        if rises10.size and rises90.size:
+            for r10 in rises10:
+                r90s = rises90[rises90 > r10]
+                if r90s.size:
+                    candidate = (r90s[0] - r10) * dt
+                    if candidate < (period or 1e9):
+                        rise_time = candidate
+                        break
+        if falls90.size and falls10.size:
+            for f90 in falls90:
+                f10s = falls10[falls10 > f90]
+                if f10s.size:
+                    candidate = (f10s[0] - f90) * dt
+                    if candidate < (period or 1e9):
+                        fall_time = candidate
+                        break
+
+    # Overshoot / undershoot (% of vamp)
+    overshoot_pct  = ((vmax - vtop)  / vamp * 100.0) if vamp > 0 else None
+    undershoot_pct = ((vbase - vmin) / vamp * 100.0) if vamp > 0 else None
+
+    return {
+        "vpp":           vpp,
+        "vmax":          vmax,
+        "vmin":          vmin,
+        "vmean":         vmean,
+        "vrms":          vrms,
+        "vamp":          vamp,
+        "vtop":          vtop,
+        "vbase":         vbase,
+        "frequency":     frequency,
+        "period":        period,
+        "duty_pct":      duty_pct,
+        "width_pos":     width_pos,
+        "width_neg":     width_neg,
+        "rise_time":     rise_time,
+        "fall_time":     fall_time,
+        "overshoot_pct": overshoot_pct if overshoot_pct is not None and overshoot_pct > 0 else None,
+        "undershoot_pct":undershoot_pct if undershoot_pct is not None and undershoot_pct > 0 else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Extended math operations
+# ---------------------------------------------------------------------------
+
+def math_trace_extended(first, op, second=None, dt=1.0):
+    """Arithmetic on one or two traces, extended beyond the basic four.
+
+    Ops: add, subtract, multiply, invert, abs, integrate, differentiate, square.
+    'first' and 'second' are volt arrays.  'dt' is the sample interval in seconds,
+    needed for integrate and differentiate.
+    """
+    EXTENDED_OPS = ("add", "subtract", "multiply", "invert",
+                    "abs", "integrate", "differentiate", "square")
+    name = str(op or "subtract").lower()
+    if name not in EXTENDED_OPS:
+        raise ValueError("unknown extended maths operation %r" % (op,))
+    left = np.asarray(first if first is not None else [], dtype=float)
+    if name == "invert":
+        return -left
+    if name == "abs":
+        return np.abs(left)
+    if name == "square":
+        return left ** 2
+    if name == "integrate":
+        # Running trapezoidal integral (Volt·seconds).
+        if left.size < 2:
+            return left
+        return np.concatenate([[0.0], np.cumsum((left[:-1] + left[1:]) * 0.5 * dt)])
+    if name == "differentiate":
+        # Central difference (Volts/second).
+        if left.size < 3:
+            return np.diff(left) / dt
+        result = np.empty_like(left)
+        result[0]  = (left[1]  - left[0])  / dt
+        result[-1] = (left[-1] - left[-2]) / dt
+        result[1:-1] = (left[2:] - left[:-2]) / (2.0 * dt)
+        return result
+    right = np.asarray(second if second is not None else [], dtype=float)
+    if left.size == 0 or right.size == 0:
+        return np.array([])
+    if left.size != right.size:
+        # Two-operand operations require equal lengths — the caller shows this as
+        # an error rather than silently padding, because a mismatch is a fact about
+        # the capture that the user should see.
+        raise ValueError("traces have different lengths (%d and %d)" % (left.size, right.size))
+    if name == "add":
+        return left + right
+    if name == "subtract":
+        return left - right
+    return left * right
+
+
+MATH_OPS_EXTENDED = (
+    "add", "subtract", "multiply", "invert",
+    "abs", "integrate", "differentiate", "square",
+)
+
+
+def math_label_extended(op, first_name, second_name=None):
+    symbols = {
+        "add": "+", "subtract": "−", "multiply": "×",
+        "invert": "−", "abs": "|·|", "integrate": "∫",
+        "differentiate": "d/dt", "square": "²",
+    }
+    sym = symbols.get(str(op).lower(), op)
+    if op in ("invert", "abs", "differentiate", "integrate", "square"):
+        return "%s(%s)" % (sym, first_name)
+    return "%s %s %s" % (first_name, sym, second_name or "?")
