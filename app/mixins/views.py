@@ -652,15 +652,19 @@ class ViewsMixin:
     # ------------------------------------------------------------------
     # Live measurement overlay on time plot
     def draw_measurement_overlay(self, channels):
-        """Draw a compact measurement badge row inside the plot.
+        """Draw a compact measurement badge inside the plot, replacing the previous one.
 
-        Reads up to 6 active measurement slots from _meas_slots and computes
-        each value from the current samples.  Displayed as a dark translucent
-        band of labels in the top-right of the axes so they never occlude the
-        waveform origin.
-
-        Uses analysis.waveform_measurements() — pure numpy, no SCPI queries.
+        Tracked via _overlay_artist so the fast path removes the stale text before
+        adding the new one — without this every frame stacks another text box.
         """
+        # Remove the artist from the previous frame.
+        for artist in getattr(self, "_overlay_artists", []):
+            try:
+                artist.remove()
+            except Exception:
+                pass
+        self._overlay_artists = []
+
         if not getattr(self, "_meas_overlay_on", True):
             return
         if not channels:
@@ -715,7 +719,7 @@ class ViewsMixin:
             return
 
         text = "\n".join(parts)
-        self.ax.text(
+        artist = self.ax.text(
             0.99, 0.99, text,
             transform=self.ax.transAxes,
             ha="right", va="top",
@@ -730,6 +734,7 @@ class ViewsMixin:
             ),
             zorder=10,
         )
+        self._overlay_artists = [artist]
 
     # ------------------------------------------------------------------
     # Software averaging
