@@ -475,6 +475,9 @@ class ViewsMixin:
         else:
             # Slow path: full clear + graticule redraw.
             self.ax.clear()
+            # The overlay artist was on the cleared axes — drop the reference so
+            # draw_measurement_overlay creates a fresh one.
+            self._overlay_artist = None
             self.ax.set_facecolor(face["face"])
             self.ax.grid(True, alpha=0.25, color=face["grid"], linestyle=":")
             self.ax.set_ylabel("Voltage (V)", color=face["text"], fontsize=9)
@@ -652,21 +655,23 @@ class ViewsMixin:
     # ------------------------------------------------------------------
     # Live measurement overlay on time plot
     def draw_measurement_overlay(self, channels):
-        """Draw a compact measurement badge inside the plot, replacing the previous one.
+        """Draw a compact measurement badge inside the plot, updated in-place.
 
-        Tracked via _overlay_artist so the fast path removes the stale text before
-        adding the new one — without this every frame stacks another text box.
+        Uses set_text() on the existing artist rather than remove()+text() to
+        avoid triggering matplotlib's autoscale chain on every frame.  The artist
+        is created once per slow-path redraw (ax.clear() removes it) and then
+        updated in-place on every subsequent fast-path frame.
         """
-        # Remove the artist from the previous frame.
-        for artist in getattr(self, "_overlay_artists", []):
-            try:
-                artist.remove()
-            except Exception:
-                pass
-        self._overlay_artists = []
-
         if not getattr(self, "_meas_overlay_on", True):
+            # Hide the artist if it exists rather than removing it.
+            a = getattr(self, "_overlay_artist", None)
+            if a is not None:
+                try:
+                    a.set_visible(False)
+                except Exception:
+                    pass
             return
+
         if not channels:
             return
         channel = channels[0]
@@ -719,6 +724,19 @@ class ViewsMixin:
             return
 
         text = "\n".join(parts)
+
+        # Try to update the existing artist in-place (avoids remove/add which
+        # triggers matplotlib's autoscale chain and distorts the y-axis limits).
+        existing = getattr(self, "_overlay_artist", None)
+        if existing is not None and existing.axes is self.ax:
+            try:
+                existing.set_text(text)
+                existing.set_visible(True)
+                return
+            except Exception:
+                self._overlay_artist = None
+
+        # First draw after ax.clear(), or first time: create the artist.
         artist = self.ax.text(
             0.99, 0.99, text,
             transform=self.ax.transAxes,
@@ -733,8 +751,9 @@ class ViewsMixin:
                 alpha=0.82,
             ),
             zorder=10,
+            clip_on=False,      # keep visible even if axes limits shift
         )
-        self._overlay_artists = [artist]
+        self._overlay_artist = artist
 
     # ------------------------------------------------------------------
     # Software averaging
