@@ -475,9 +475,6 @@ class ViewsMixin:
         else:
             # Slow path: full clear + graticule redraw.
             self.ax.clear()
-            # The overlay artist was on the cleared axes — drop the reference so
-            # draw_measurement_overlay creates a fresh one.
-            self._overlay_artist = None
             self.ax.set_facecolor(face["face"])
             self.ax.grid(True, alpha=0.25, color=face["grid"], linestyle=":")
             self.ax.set_ylabel("Voltage (V)", color=face["text"], fontsize=9)
@@ -655,31 +652,33 @@ class ViewsMixin:
     # ------------------------------------------------------------------
     # Live measurement overlay on time plot
     def draw_measurement_overlay(self, channels):
-        """Draw a compact measurement badge inside the plot, updated in-place.
+        """Update the Tk overlay label with live measurements.
 
-        Uses set_text() on the existing artist rather than remove()+text() to
-        avoid triggering matplotlib's autoscale chain on every frame.  The artist
-        is created once per slow-path redraw (ax.clear() removes it) and then
-        updated in-place on every subsequent fast-path frame.
+        The label is a plain tk.Label placed over the canvas with place().
+        It never touches matplotlib, so it cannot affect axes limits or
+        trigger autoscale.  The label text is updated every frame via
+        label.configure(text=...) — instant, no redraw cost.
         """
+        label = getattr(self, "_overlay_label", None)
+        if label is None:
+            return
+
         if not getattr(self, "_meas_overlay_on", True):
-            # Hide the artist if it exists rather than removing it.
-            a = getattr(self, "_overlay_artist", None)
-            if a is not None:
-                try:
-                    a.set_visible(False)
-                except Exception:
-                    pass
+            label.place_forget()
             return
 
         if not channels:
+            label.place_forget()
             return
+
         channel = channels[0]
         try:
             meas = analysis.waveform_measurements(channel)
         except Exception:
+            label.place_forget()
             return
         if not meas:
+            label.place_forget()
             return
 
         # Which slots to show — user-configurable, default to the most useful 6.
@@ -687,23 +686,23 @@ class ViewsMixin:
                         ["freq", "period", "vpp", "vrms", "duty", "rise"])
 
         SLOT_MAP = {
-            "freq":       ("Freq",  meas.get("frequency"),   analysis.format_hz),
-            "period":     ("Per",   meas.get("period"),      analysis.format_seconds),
-            "vpp":        ("Vpp",   meas.get("vpp"),         analysis.format_volts),
-            "vmax":       ("Vmax",  meas.get("vmax"),        analysis.format_volts),
-            "vmin":       ("Vmin",  meas.get("vmin"),        analysis.format_volts),
-            "vmean":      ("Mean",  meas.get("vmean"),       analysis.format_volts),
-            "vrms":       ("RMS",   meas.get("vrms"),        analysis.format_volts),
-            "vamp":       ("Vamp",  meas.get("vamp"),        analysis.format_volts),
-            "vtop":       ("Vtop",  meas.get("vtop"),        analysis.format_volts),
-            "vbase":      ("Vbase", meas.get("vbase"),       analysis.format_volts),
-            "duty":       ("Duty",  meas.get("duty_pct"),    lambda v: "%.1f%%" % v),
-            "rise":       ("Rise",  meas.get("rise_time"),   analysis.format_seconds),
-            "fall":       ("Fall",  meas.get("fall_time"),   analysis.format_seconds),
-            "width+":     ("+Wid",  meas.get("width_pos"),   analysis.format_seconds),
-            "width-":     ("-Wid",  meas.get("width_neg"),   analysis.format_seconds),
-            "overshoot":  ("Ovr",   meas.get("overshoot_pct"), lambda v: "%.1f%%" % v),
-            "undershoot": ("Und",   meas.get("undershoot_pct"), lambda v: "%.1f%%" % v),
+            "freq":       ("Freq",  meas.get("frequency"),    analysis.format_hz),
+            "period":     ("Per",   meas.get("period"),       analysis.format_seconds),
+            "vpp":        ("Vpp",   meas.get("vpp"),          analysis.format_volts),
+            "vmax":       ("Vmax",  meas.get("vmax"),         analysis.format_volts),
+            "vmin":       ("Vmin",  meas.get("vmin"),         analysis.format_volts),
+            "vmean":      ("Mean",  meas.get("vmean"),        analysis.format_volts),
+            "vrms":       ("RMS",   meas.get("vrms"),         analysis.format_volts),
+            "vamp":       ("Vamp",  meas.get("vamp"),         analysis.format_volts),
+            "vtop":       ("Vtop",  meas.get("vtop"),         analysis.format_volts),
+            "vbase":      ("Vbase", meas.get("vbase"),        analysis.format_volts),
+            "duty":       ("Duty",  meas.get("duty_pct"),     lambda v: "%.1f%%" % v),
+            "rise":       ("Rise",  meas.get("rise_time"),    analysis.format_seconds),
+            "fall":       ("Fall",  meas.get("fall_time"),    analysis.format_seconds),
+            "width+":     ("+Wid",  meas.get("width_pos"),    analysis.format_seconds),
+            "width-":     ("-Wid",  meas.get("width_neg"),    analysis.format_seconds),
+            "overshoot":  ("Ovr",   meas.get("overshoot_pct"),lambda v: "%.1f%%" % v),
+            "undershoot": ("Und",   meas.get("undershoot_pct"),lambda v: "%.1f%%" % v),
         }
 
         parts = []
@@ -711,49 +710,29 @@ class ViewsMixin:
             entry = SLOT_MAP.get(slot)
             if entry is None:
                 continue
-            label, value, fmt = entry
+            lbl, value, fmt = entry
             if value is None:
-                parts.append("%-6s  ---" % label)
+                parts.append("%-6s  ---" % lbl)
             else:
                 try:
-                    parts.append("%-6s  %s" % (label, fmt(value)))
+                    parts.append("%-6s  %s" % (lbl, fmt(value)))
                 except Exception:
-                    parts.append("%-6s  ?" % label)
+                    parts.append("%-6s  ?" % lbl)
 
         if not parts:
+            label.place_forget()
             return
 
-        text = "\n".join(parts)
+        label.configure(text="\n".join(parts))
 
-        # Try to update the existing artist in-place (avoids remove/add which
-        # triggers matplotlib's autoscale chain and distorts the y-axis limits).
-        existing = getattr(self, "_overlay_artist", None)
-        if existing is not None and existing.axes is self.ax:
-            try:
-                existing.set_text(text)
-                existing.set_visible(True)
-                return
-            except Exception:
-                self._overlay_artist = None
-
-        # First draw after ax.clear(), or first time: create the artist.
-        artist = self.ax.text(
-            0.99, 0.99, text,
-            transform=self.ax.transAxes,
-            ha="right", va="top",
-            fontsize=7.5,
-            fontfamily="monospace",
-            color="#c4e8d8",
-            bbox=dict(
-                boxstyle="round,pad=0.4",
-                facecolor="#101c1e",
-                edgecolor="#2a4040",
-                alpha=0.82,
-            ),
-            zorder=10,
-            clip_on=False,      # keep visible even if axes limits shift
-        )
-        self._overlay_artist = artist
+        # Position in the top-right corner of the canvas, inset by 8 px.
+        try:
+            cw = self.canvas.get_tk_widget().winfo_width()
+            label.update_idletasks()
+            lw = label.winfo_reqwidth()
+            label.place(x=cw - lw - 8, y=8, anchor="nw")
+        except Exception:
+            label.place(relx=1.0, rely=0.0, x=-8, y=8, anchor="ne")
 
     # ------------------------------------------------------------------
     # Software averaging

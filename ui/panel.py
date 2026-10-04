@@ -619,6 +619,18 @@ class ModernLabUI:
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
         self._connect_plot_events()
         self._install_zoom_selector()
+        # Overlay label: a Tk widget placed over the canvas, never touching matplotlib.
+        # Updated by draw_measurement_overlay() via set_text; zero matplotlib impact.
+        self._overlay_label = tk.Label(
+            self.canvas.get_tk_widget(),
+            text="", bg="#101c1e", fg="#c4e8d8",
+            font=("Courier", 8), justify="left",
+            padx=5, pady=3, relief="flat", bd=0,
+            anchor="nw",
+        )
+        # Place it in the top-right; will be repositioned on each update so it
+        # always sits inside the axes regardless of window size.
+        self._overlay_label.place_forget()  # hidden until first data arrives
         readouts = tk.Frame(parent, bg=SCREEN)
         readouts.pack(fill="x", pady=(0, 8))
         self._readout_widgets = {}
