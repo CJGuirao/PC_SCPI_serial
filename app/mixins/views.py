@@ -80,7 +80,6 @@ class ViewsMixin:
                          color=palette["text"], fontsize=11)
             self.ax.set_xlabel("Frequency", color=palette["text"], fontsize=9)
             self.ax.set_ylabel("", color=palette["text"], fontsize=9)
-            self.canvas.draw_idle()
             return
         frequencies, values = analysis.display_spectrum(spectrum)
         self.ax.plot(frequencies, values, color=palette["trace1"], linewidth=1.2)
@@ -131,7 +130,9 @@ class ViewsMixin:
                              analysis.format_rate(spectrum["sample_rate"]),
                              analysis.format_hz(spectrum["nyquist"]), spectrum["bin_hz"]),
                           color=palette["text"], fontsize=8, loc="left")
-        self.canvas.draw_idle()
+        # Do NOT call canvas.draw_idle() here — plot_waveform's finally block
+        # adds cursor artists after this returns, and calls draw_idle() itself.
+        # Calling it here causes a double-render with autoscale re-enabled between.
 
     def plot_math(self):
         """One trace computed from two: the vendor's Mathematics panel, in our own frame."""
@@ -151,7 +152,6 @@ class ViewsMixin:
             self.ax.text(0.5, 0.5, "Nothing to compute: a channel is missing",
                          transform=self.ax.transAxes, ha="center", va="center",
                          color=palette["text"], fontsize=11)
-            self.canvas.draw_idle()
             return
         try:
             dt = analysis.point_interval(first)
@@ -164,7 +164,6 @@ class ViewsMixin:
             # capture, so it is reported as one rather than padded away.
             self.ax.text(0.5, 0.5, str(exc), transform=self.ax.transAxes, ha="center",
                          va="center", color="#ff9c5b", fontsize=10)
-            self.canvas.draw_idle()
             return
         times = analysis.sample_times(first)
         label = analysis.math_label_extended(op, str(first.get("name", "CH1")).upper(),
@@ -175,7 +174,6 @@ class ViewsMixin:
         self.ax.set_title("%s \u2022 %s" % (label, analysis.format_volts(
             float(max(computed) - min(computed)) if computed.size else 0.0) + " pk-pk"),
             color=palette["text"], fontsize=8, loc="left")
-        self.canvas.draw_idle()
 
     def plot_xy(self):
         """CH1 against CH2: the Lissajous view, and the phase between them.
@@ -199,18 +197,15 @@ class ViewsMixin:
             self.ax.text(0.5, 0.5, "XY needs two channels: CH1 or CH2 is not available",
                          transform=self.ax.transAxes, ha="center", va="center",
                          color=palette["text"], fontsize=11)
-            self.canvas.draw_idle()
             return
         xs, ys = analysis.xy_pairs(analysis.samples(first), analysis.samples(second))
         if xs.size == 0:
             self.ax.text(0.5, 0.5, "No samples", transform=self.ax.transAxes, ha="center",
                          va="center", color=palette["text"], fontsize=11)
-            self.canvas.draw_idle()
             return
         self.ax.plot(xs, ys, color=palette["trace2"], linewidth=1.0)
         self.ax.set_title("XY \u2022 %d points" % xs.size, color=palette["text"],
                           fontsize=8, loc="left")
-        self.canvas.draw_idle()
 
     def analysis_traces(self):
         """{(name): (times, volts)} exactly as the plot draws them.
@@ -497,9 +492,6 @@ class ViewsMixin:
                     _nm, _col, mx, my = per_channel_xy[0]
                     self.draw_mask(mx, my)
                 self.show_graticule(framing, window, unit, factor)
-                # Freeze the axes limits set by show_graticule so matplotlib's
-                # draw_idle() cannot re-run autoscale and override them.
-                self.ax.autoscale(False)
                 # Apply zoom limits if the user has dragged a rectangle.
                 xlim = getattr(self, "_zoom_xlim", None)
                 ylim = getattr(self, "_zoom_ylim", None)
@@ -514,6 +506,10 @@ class ViewsMixin:
         self.draw_reference_lines(plotted)
         self.draw_zero_markers(references if plotted else [])
         self.draw_measurement_overlay(channels)
+        # Lock limits now — draw_reference_lines and draw_zero_markers add artists
+        # (axhline, annotate) which mark the axes stale.  Without this,
+        # draw_idle() re-runs autoscale and overrides the ylim set by show_graticule.
+        self.ax.autoscale(False)
         self.canvas.draw_idle()
         self._plot_cache = channels
         self.sync_vertical_controls()
