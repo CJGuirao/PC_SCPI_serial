@@ -154,8 +154,11 @@ class ViewsMixin:
             self.canvas.draw_idle()
             return
         try:
-            computed = analysis.math_trace(analysis.samples(first),
-                                           None if op == "invert" else analysis.samples(second), op)
+            dt = analysis.point_interval(first)
+            sec_samples = None if op in ("invert", "abs", "integrate",
+                                         "differentiate", "square") else analysis.samples(second)
+            computed = analysis.math_trace_extended(
+                analysis.samples(first), op, sec_samples, dt=dt)
         except ValueError as exc:
             # Two channels that came back with different lengths is a fact about the
             # capture, so it is reported as one rather than padded away.
@@ -164,8 +167,8 @@ class ViewsMixin:
             self.canvas.draw_idle()
             return
         times = analysis.sample_times(first)
-        label = analysis.math_label(op, str(first.get("name", "CH1")).upper(),
-                                    str(second.get("name", "CH2")).upper())
+        label = analysis.math_label_extended(op, str(first.get("name", "CH1")).upper(),
+                                    str((second or {}).get("name", "CH2")).upper())
         self.ax.plot(times[:computed.size], computed, color=palette["math"], linewidth=1.5, label=label)
         self.ax.legend(loc="upper right", fontsize=8, facecolor=palette["face"],
                        labelcolor=palette["text"], framealpha=0.85)
@@ -504,6 +507,7 @@ class ViewsMixin:
         self.draw_protocol_frames()
         self.draw_reference_lines(plotted)
         self.draw_zero_markers(references if plotted else [])
+        self.draw_measurement_overlay(channels)
         self.canvas.draw_idle()
         self._plot_cache = channels
         self.sync_vertical_controls()
@@ -644,6 +648,91 @@ class ViewsMixin:
                              annotation_clip=False)
             self._zero_mark_artists.extend([line, annot])
             self._zero_marks.append({"name": name, "offset": offset, "label": label})
+
+    # ------------------------------------------------------------------
+    # Live measurement overlay on time plot
+    def draw_measurement_overlay(self, channels):
+        """Update the Tk overlay label with live measurements.
+
+        The label is a plain tk.Label placed over the canvas with place().
+        It never touches matplotlib, so it cannot affect axes limits or
+        trigger autoscale.  The label text is updated every frame via
+        label.configure(text=...) — instant, no redraw cost.
+        """
+        label = getattr(self, "_overlay_label", None)
+        if label is None:
+            return
+
+        if not getattr(self, "_meas_overlay_on", True):
+            label.place_forget()
+            return
+
+        if not channels:
+            label.place_forget()
+            return
+
+        channel = channels[0]
+        try:
+            meas = analysis.waveform_measurements(channel)
+        except Exception:
+            label.place_forget()
+            return
+        if not meas:
+            label.place_forget()
+            return
+
+        # Which slots to show — user-configurable, default to the most useful 6.
+        slots = getattr(self, "_meas_slots",
+                        ["freq", "period", "vpp", "vrms", "duty", "rise"])
+
+        SLOT_MAP = {
+            "freq":       ("Freq",  meas.get("frequency"),    analysis.format_hz),
+            "period":     ("Per",   meas.get("period"),       analysis.format_seconds),
+            "vpp":        ("Vpp",   meas.get("vpp"),          analysis.format_volts),
+            "vmax":       ("Vmax",  meas.get("vmax"),         analysis.format_volts),
+            "vmin":       ("Vmin",  meas.get("vmin"),         analysis.format_volts),
+            "vmean":      ("Mean",  meas.get("vmean"),        analysis.format_volts),
+            "vrms":       ("RMS",   meas.get("vrms"),         analysis.format_volts),
+            "vamp":       ("Vamp",  meas.get("vamp"),         analysis.format_volts),
+            "vtop":       ("Vtop",  meas.get("vtop"),         analysis.format_volts),
+            "vbase":      ("Vbase", meas.get("vbase"),        analysis.format_volts),
+            "duty":       ("Duty",  meas.get("duty_pct"),     lambda v: "%.1f%%" % v),
+            "rise":       ("Rise",  meas.get("rise_time"),    analysis.format_seconds),
+            "fall":       ("Fall",  meas.get("fall_time"),    analysis.format_seconds),
+            "width+":     ("+Wid",  meas.get("width_pos"),    analysis.format_seconds),
+            "width-":     ("-Wid",  meas.get("width_neg"),    analysis.format_seconds),
+            "overshoot":  ("Ovr",   meas.get("overshoot_pct"),lambda v: "%.1f%%" % v),
+            "undershoot": ("Und",   meas.get("undershoot_pct"),lambda v: "%.1f%%" % v),
+        }
+
+        parts = []
+        for slot in slots:
+            entry = SLOT_MAP.get(slot)
+            if entry is None:
+                continue
+            lbl, value, fmt = entry
+            if value is None:
+                parts.append("%-6s  ---" % lbl)
+            else:
+                try:
+                    parts.append("%-6s  %s" % (lbl, fmt(value)))
+                except Exception:
+                    parts.append("%-6s  ?" % lbl)
+
+        if not parts:
+            label.place_forget()
+            return
+
+        label.configure(text="\n".join(parts))
+
+        # Position in the top-right corner of the canvas, inset by 8 px.
+        try:
+            cw = self.canvas.get_tk_widget().winfo_width()
+            label.update_idletasks()
+            lw = label.winfo_reqwidth()
+            label.place(x=cw - lw - 8, y=8, anchor="nw")
+        except Exception:
+            label.place(relx=1.0, rely=0.0, x=-8, y=8, anchor="ne")
 
     # ------------------------------------------------------------------
     # Software averaging

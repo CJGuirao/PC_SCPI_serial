@@ -207,3 +207,43 @@ class DmmMixin:
             return
         prefix = "REL " if self.dmm_relative.get() else ""
         self.dmm_value.set(("%s%.4f %s" % (prefix, reading, self._dmm_caption)).strip())
+        # Feed the DMM trend buffer.
+        self._push_dmm_trend(float(reading))
+
+    # ------------------------------------------------------------------
+    # DMM trend graph
+    def _push_dmm_trend(self, value):
+        """Add one reading to the rolling DMM trend buffer and refresh the graph."""
+        from collections import deque
+        depth = getattr(self, "_dmm_trend_depth", 300)
+        buf = getattr(self, "_dmm_trend_buf", None)
+        if buf is None:
+            self._dmm_trend_buf = deque(maxlen=depth)
+            buf = self._dmm_trend_buf
+        buf.append(value)
+        self._draw_dmm_trend()
+
+    def _draw_dmm_trend(self):
+        """Redraw the DMM trend mini-plot."""
+        ax = getattr(self, "_dmm_ax", None)
+        canvas = getattr(self, "_dmm_canvas", None)
+        buf = getattr(self, "_dmm_trend_buf", None)
+        if ax is None or canvas is None or not buf:
+            return
+        import numpy as np
+        vals = np.array(list(buf), dtype=float)
+        ax.clear()
+        ax.set_facecolor("#101719")
+        ax.tick_params(labelsize=6, colors="#7a9090")
+        for spine in ax.spines.values():
+            spine.set_edgecolor("#2a4040")
+        ax.plot(vals, color="#9cdc9c", linewidth=0.9)
+        if vals.size >= 2:
+            lo, hi = vals.min(), vals.max()
+            pad = max(abs(hi - lo) * 0.1, 1e-6)
+            ax.set_ylim(lo - pad, hi + pad)
+        ax.axhline(float(vals[-1]), color="#ffd166", linewidth=0.6, linestyle=":")
+        try:
+            canvas.draw_idle()
+        except Exception:
+            pass

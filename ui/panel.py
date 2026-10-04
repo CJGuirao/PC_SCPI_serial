@@ -619,6 +619,18 @@ class ModernLabUI:
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
         self._connect_plot_events()
         self._install_zoom_selector()
+        # Overlay label: a Tk widget placed over the canvas, never touching matplotlib.
+        # Updated by draw_measurement_overlay() via set_text; zero matplotlib impact.
+        self._overlay_label = tk.Label(
+            self.canvas.get_tk_widget(),
+            text="", bg="#101c1e", fg="#c4e8d8",
+            font=("Courier", 8), justify="left",
+            padx=5, pady=3, relief="flat", bd=0,
+            anchor="nw",
+        )
+        # Place it in the top-right; will be repositioned on each update so it
+        # always sits inside the axes regardless of window size.
+        self._overlay_label.place_forget()  # hidden until first data arrives
         readouts = tk.Frame(parent, bg=SCREEN)
         readouts.pack(fill="x", pady=(0, 8))
         self._readout_widgets = {}
@@ -762,6 +774,79 @@ class ModernLabUI:
                                   font=("Consolas", 8), bd=0, padx=6, pady=4,
                                   state="disabled")
         self.stats_text.pack(fill="both", expand=True, pady=(4, 0))
+
+        # ── Measurement overlay config ──────────────────────────────
+        overlay_frame = ttk.Frame(measure, padding=(6, 4))
+        overlay_frame.pack(side="left", fill="y", anchor="n")
+        ttk.Label(overlay_frame, text="ON-PLOT",
+                  font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        self.meas_overlay_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(overlay_frame, text="Show overlay",
+                       variable=self.meas_overlay_var, bg=PANEL, fg=INK,
+                       selectcolor=PANEL, activebackground=PANEL,
+                       command=lambda: setattr(self, "_meas_overlay_on",
+                                               self.meas_overlay_var.get())
+                       ).pack(anchor="w", pady=(4, 2))
+        ttk.Label(overlay_frame, text="Slots (pick 1–8):",
+                  font=("Segoe UI", 7), foreground="#8fa3a3").pack(anchor="w")
+        ALL_SLOTS = ["freq", "period", "vpp", "vrms", "vmean", "vmax", "vmin",
+                     "vamp", "vtop", "vbase", "duty", "rise", "fall",
+                     "width+", "width-", "overshoot", "undershoot"]
+        self.slot_listbox = tk.Listbox(overlay_frame, selectmode="multiple",
+                                       height=8, width=12,
+                                       bg=SCREEN, fg="#c4d6d2",
+                                       font=("Consolas", 8), bd=0,
+                                       selectbackground="#2a5a4a",
+                                       selectforeground="#9cf0c9")
+        for s in ALL_SLOTS:
+            self.slot_listbox.insert("end", s)
+        # Pre-select the defaults.
+        default_slots = getattr(self, "_meas_slots",
+                                ["freq", "period", "vpp", "vrms", "duty", "rise"])
+        for i, s in enumerate(ALL_SLOTS):
+            if s in default_slots:
+                self.slot_listbox.selection_set(i)
+        self.slot_listbox.pack(anchor="w", pady=2)
+        def _apply_slots():
+            sel = [ALL_SLOTS[i] for i in self.slot_listbox.curselection()]
+            if sel:
+                self._meas_slots = sel
+        self.key(overlay_frame, "APPLY", _apply_slots,
+                 color="#444c4e").pack(fill="x", pady=(2, 0))
+
+        # ── DMM trend mini-plot ─────────────────────────────────────
+        trend_frame = ttk.Frame(measure, padding=(6, 4))
+        trend_frame.pack(side="left", fill="both", expand=True, anchor="n")
+        ttk.Label(trend_frame, text="DMM TREND",
+                  font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        try:
+            from matplotlib.figure import Figure
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+            dmm_fig = Figure(figsize=(3.5, 1.8), facecolor="#101719")
+            self._dmm_ax = dmm_fig.add_subplot(111, facecolor="#101719")
+            dmm_fig.subplots_adjust(left=0.15, right=0.97, top=0.95, bottom=0.15)
+            dmm_canvas = FigureCanvasTkAgg(dmm_fig, master=trend_frame)
+            dmm_canvas.get_tk_widget().configure(
+                width=280, height=130, highlightthickness=0)
+            dmm_canvas.get_tk_widget().pack(fill="both", expand=True, pady=(4, 0))
+            self._dmm_canvas = dmm_canvas
+        except Exception:
+            self._dmm_ax = None
+            self._dmm_canvas = None
+        depth_row = ttk.Frame(trend_frame)
+        depth_row.pack(anchor="w", pady=(2, 0))
+        ttk.Label(depth_row, text="Points").pack(side="left", padx=(0, 4))
+        self.dmm_trend_depth_var = tk.StringVar(value="300")
+        depth_box = ttk.Combobox(depth_row, textvariable=self.dmm_trend_depth_var,
+                                 values=("60", "120", "300", "600", "1200"),
+                                 state="readonly", width=5)
+        depth_box.pack(side="left")
+        depth_box.bind("<<ComboboxSelected>>",
+                       lambda e: setattr(self, "_dmm_trend_depth",
+                                         int(self.dmm_trend_depth_var.get())))
+        self.key(depth_row, "CLEAR",
+                 lambda: setattr(self, "_dmm_trend_buf", None),
+                 color="#444c4e").pack(side="left", padx=(4, 0))
         for label, name, values, default, command in (
             ("Type", "acq_type", self.choices("acquire_mode_choices", "ACQ_TYPES"),
              "SAMPle", self.set_acquire_type),
@@ -779,6 +864,31 @@ class ModernLabUI:
         for label, command in (("Replot data", self.plot_waveform), ("Clear display", self.clear_plot),
                                ("Query settings", self.query_all_states), ("Reset scope", self.reset_scope)):
             self.key(actions, label, command).pack(fill="x", pady=1)
+
+        # ── Scope presets ───────────────────────────────────────────
+        preset_outer = ttk.Frame(utility, padding=(6, 4))
+        preset_outer.pack(side="left", fill="y", anchor="n")
+        ttk.Label(preset_outer, text="PRESETS",
+                  font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        preset_sel_row = ttk.Frame(preset_outer)
+        preset_sel_row.pack(anchor="w", pady=(4, 2))
+        self.preset_name_var = tk.StringVar(value="")
+        self.preset_box = ttk.Combobox(preset_sel_row,
+                                       textvariable=self.preset_name_var,
+                                       values=sorted(getattr(self, "_presets", {}).keys()),
+                                       state="readonly", width=14)
+        self.preset_box.pack(side="left", padx=(0, 4))
+        self.key(preset_sel_row, "RECALL",
+                 lambda: self.recall_preset(self.preset_name_var.get()),
+                 color="#9cd4e8").pack(side="left")
+        preset_btn_row = ttk.Frame(preset_outer)
+        preset_btn_row.pack(anchor="w", pady=2)
+        self.key(preset_btn_row, "SAVE AS…", self.save_preset,
+                 color="#9cdc9c").pack(side="left", padx=(0, 4))
+        self.key(preset_btn_row, "DELETE",
+                 lambda: self.delete_preset(self.preset_name_var.get()),
+                 color="#444c4e").pack(side="left")
+
         self.log_text = self.text_area(utility)
         # Legacy log writes to both destinations; keep the console available in its own tab.
         console = ttk.Frame(self.drawer, padding=8)
@@ -1349,7 +1459,7 @@ class ModernLabUI:
         row = ttk.Frame(maths)
         row.pack(anchor="w", pady=2)
         ttk.Label(row, text="Op").pack(side="left", padx=(0, 3))
-        op_box = ttk.Combobox(row, values=analysis.MATH_OPS, state="readonly", width=9)
+        op_box = ttk.Combobox(row, values=analysis.MATH_OPS_EXTENDED, state="readonly", width=13)
         op_box.set(self._math_options.get("op", "subtract"))
         op_box.pack(side="left", padx=(0, 8))
         op_box.bind("<<ComboboxSelected>>",

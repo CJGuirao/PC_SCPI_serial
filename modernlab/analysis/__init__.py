@@ -11,6 +11,7 @@ Splitting the module further means changing this list, not the callers.
 from .analysis import (
     FFT_FORMATS,
     MATH_OPS,
+    MATH_OPS_EXTENDED,
     SCREEN_DIVISIONS,
     TIMEBASE_LADDER,
     WINDOWS,
@@ -24,8 +25,11 @@ from .analysis import (
     format_rate,
     format_seconds,
     format_volts,
+    harmonic_analysis,
     math_label,
+    math_label_extended,
     math_trace,
+    math_trace_extended,
     nearest_from_ladder,
     point_interval,
     sample_times,
@@ -35,12 +39,14 @@ from .analysis import (
     timebase_for,
     value_at,
     window_values,
+    waveform_measurements,
     xy_pairs,
 )
 
 __all__ = [
     "FFT_FORMATS",
     "MATH_OPS",
+    "MATH_OPS_EXTENDED",
     "SCREEN_DIVISIONS",
     "TIMEBASE_LADDER",
     "WINDOWS",
@@ -53,8 +59,11 @@ __all__ = [
     "format_rate",
     "format_seconds",
     "format_volts",
+    "harmonic_analysis",
     "math_label",
+    "math_label_extended",
     "math_trace",
+    "math_trace_extended",
     "nearest_from_ladder",
     "point_interval",
     "sample_times",
@@ -64,5 +73,6 @@ __all__ = [
     "timebase_for",
     "value_at",
     "window_values",
+    "waveform_measurements",
     "xy_pairs",
 ]

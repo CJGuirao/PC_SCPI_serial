@@ -159,6 +159,15 @@ class App(ConnectionMixin, ControlsMixin, DmmMixin, FramingMixin, ViewsMixin, Re
         #: Running counters for live mask testing.
         self._mask_pass = 0
         self._mask_fail = 0
+        # --- Scope presets ---
+        #: {name: {setting_key: value}} dict, persisted in setup JSON.
+        self._presets = {}
+        # --- Measurement overlay ---
+        self._meas_overlay_on = True
+        self._meas_slots = ["freq", "period", "vpp", "vrms", "duty", "rise"]
+        # --- DMM trend ---
+        self._dmm_trend_buf = None
+        self._dmm_trend_depth = 300
 
         self.setup_gui()
         self._bind_keys()
