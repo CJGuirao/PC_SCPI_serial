@@ -1,159 +1,95 @@
-# OWON HDS Oscilloscope — PC Software
+# OWON HDS Scope
 
-A Python PC oscilloscope for **OWON HDS200 and HDS300 series** handheld scopes, connected over USB.
+PC oscilloscope software for OWON HDS200 and HDS300 series handheld scopes.  
+Connect via USB and get a full-featured scope display on your PC — better than the software that ships with the instrument.
 
-> **Verified hardware:** HDS271, firmware V1.3.0. HDS300-series and other HDS200 models share the same command structure and will work; the app logs an "unverified model" notice on connect.
-
----
-
-## Features
-
-### Acquisition
-- Live streaming capture at ~1.5 fps (USB HID hardware floor)
-- RUN / STOP, CAPTURE, SINGLE trigger, AUTO frame (software, from measured frequency)
-- Auto-reconnect watchdog after USB stall
-- Software averaging (2–64 frames) to reduce noise
-
-### Waveform display
-- 12 × 8 graticule matching the instrument screen
-- Calibrated voltage decode (fitted against the instrument's own Vpp reading)
-- Reference trace overlay — save/compare before and after
-- Trace persistence / digital phosphor (4–64 ghost frames)
-- Right-click drag to zoom any region; ZOOM OUT to reset
-
-### Live measurement overlay
-17 measurements computed every frame from the captured samples — no extra USB queries:
-
-| | | |
-|---|---|---|
-| Vpp · Vmax · Vmin | Vmean · Vrms | Vamp · Vtop · Vbase |
-| Frequency · Period | Duty % | Width + / − |
-| Rise time · Fall time | Overshoot % · Undershoot % | |
-
-Displayed as a floating badge on the plot; slots are user-configurable (MEASURE drawer → ON-PLOT).
-
-### Analysis
-- **FFT** — Hanning / Hamming / Blackman / Rectangle, dBV / Vrms / V, linear or log frequency, peaks labelled
-- **Harmonic analysis + THD** — marks fundamental and 2H–8H, shows THD % and dB
-- **Math** — 8 ops: add, subtract, multiply, invert, abs, integrate (V·s), differentiate (V/s), square
-- **XY / Lissajous** (two-channel scopes)
-
-### Cursors
-- V1/V2 time cursors and H1/H2 voltage cursors
-- FFT view: F1/F2 frequency + M1/M2 magnitude cursors
-- Readout bar: ΔT, 1/ΔT, ΔV, signal level at each cursor
-
-### Pass / Fail mask
-- Set a tolerance % envelope around a reference capture
-- Every live frame tested; PASS/FAIL badge + running P/F counter on the plot
-
-### Protocol decode
-Decoded frames shown as coloured bands on the waveform:
-- **UART** — baud auto-detect, 8N1/8E1, RS-232 invert
-- **SPI** — Mode 0–3, MOSI + MISO, CS gating
-- **I²C** — 7-bit and 10-bit addressing, START/STOP/ACK/NAK
-- **CAN** — Classical CAN base frame, 11-bit ID
-
-### Multimeter (HDS271)
-- DC/AC voltage, live reading, REL mode
-- DMM trend graph — rolling history up to 1200 readings
-
-### Other
-- Measurement statistics table (min / max / mean, rolling window)
-- Scope presets — save/recall named panel configurations
-- PNG image export (one click, timestamped, I key)
-- CSV / JSON / XLSX / PDF waveform export
-- SCPI console
-- Keyboard shortcuts: Space=RUN/STOP · A=AUTO · S=SINGLE · C=CAPTURE · Z=ZOOM OUT · R=SAVE REF · I=IMG · Esc=CLEAR CURSORS
+> Tested on HDS271 firmware V1.3.0. Other HDS200/300 models should work.
 
 ---
 
-## Requirements
+## Quick start
 
-- Windows 10/11 64-bit
-- Python 3.9+
-- numpy, matplotlib, pillow, pyusb, libusb-package, pypdf
-- tkinter (bundled with CPython on Windows)
-- **libusb driver** bound to the scope via [Zadig](https://zadig.akeo.ie/) — select the OWON device (VID 5345 / PID 1234) and install WinUSB or libusb-win32
+1. Install the libusb driver with [Zadig](https://zadig.akeo.ie/) — select your OWON scope and choose **WinUSB**
+2. Download the latest release from the [Releases](../../releases) page
+3. Unzip and run **OWONScope.exe** — no installation needed
+4. Click **Connect**, then **LIVE**
 
 ---
 
-## Installation from source
+## What it does
+
+**Waveform**  
+The main display shows a calibrated waveform with a proper 12×8 graticule matching what you see on the scope screen.
+Voltage is decoded against the instrument's own readings, not the cosmetic volts/div label.
+
+**Live measurements overlay**  
+Frequency, period, Vpp, RMS, duty cycle, rise time and more are computed from every captured frame and shown as a badge on the plot. You choose which measurements to display (up to 8 slots).
+
+**FFT**  
+Spectrum view with Hanning/Hamming/Blackman/Rectangle windows, dBV/Vrms/V output, linear or log frequency axis, peak labels. Enable **THD** to identify harmonics and get a Total Harmonic Distortion readout.
+
+**Math**  
+Eight operations on the waveform: add, subtract, multiply, invert, abs, **integrate**, **differentiate**, square.
+
+**Cursors**  
+Time and voltage cursors with ΔT, 1/ΔT and ΔV readout. In FFT view they switch to frequency and magnitude automatically.
+
+**Pass / Fail mask**  
+Capture a reference waveform, set a tolerance %, and the scope tests every live frame against the envelope — useful for production checks.
+
+**Protocol decode**  
+Click DECODE to decode digital signals directly from the waveform: UART, SPI, I²C, CAN. Decoded bytes appear as labelled bands on the plot.
+
+**Multimeter**  
+The HDS271's built-in DMM is shown in the Measurements panel, with a live trend graph that tracks readings over time.
+
+**Export**  
+Save the waveform as CSV, JSON, Excel, PNG or PDF. One-click timestamped PNG screenshot with the **I** key.
+
+**Presets**  
+Save and recall named panel configurations (timebase, scale, trigger settings) from the Utility drawer.
+
+---
+
+## Keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| Space | RUN / STOP |
+| A | AUTO frame |
+| S | SINGLE capture |
+| C | CAPTURE one frame |
+| Z | Zoom out |
+| R | Save reference trace |
+| I | Save plot image |
+| Esc | Clear cursors |
+
+---
+
+## Hardware requirements
+
+- OWON HDS200 or HDS300 series scope connected by USB
+- Windows 10 or 11, 64-bit
+- libusb driver bound to the scope via [Zadig](https://zadig.akeo.ie/) (WinUSB)
+
+---
+
+## Running from source
 
 ```bash
 python -m venv .venv
-./.venv/Scripts/python.exe -m pip install -r requirements.txt
-```
-
-### Run
-
-```bat
-set "TCL_LIBRARY=" && set "TK_LIBRARY=" && .venv\Scripts\python.exe main.py
-```
-
-```bash
-# Git Bash
-unset TCL_LIBRARY TK_LIBRARY && ./.venv/Scripts/python.exe main.py
-```
-
-> The TCL_LIBRARY / TK_LIBRARY variables must be cleared — some installed software exports them machine-wide, which prevents tkinter from starting.
-
----
-
-## Portable release
-
-Download **OWONScope-vX.Y.Z-windows-x64.zip** from the [Releases](../../releases) page, extract anywhere, and run OWONScope.exe. No installation needed.
-
----
-
-## Tests
-
-427 tests, headless (no instrument attached):
-
-```bash
+.venv/Scripts/python.exe -m pip install -r requirements.txt
 unset TCL_LIBRARY TK_LIBRARY
-./.venv/Scripts/python.exe -m unittest discover -s tests -t .
+.venv/Scripts/python.exe main.py
 ```
 
 ---
 
-## Project structure
+## Known limits
 
-```
-main.py                    launcher
-ui/                        front panel (widgets, dialogs, ModernLabUI)
-app/                       App and its instrument mixins
-  mixins/                  connection, controls, dmm, framing, views,
-                           readback, autoset, recording, files
-modernlab/
-  instrument/transport/    USB HID transport (pyusb)
-  instrument/capture/      payload to volts (calibration, decode)
-  instrument/dialect/      HDS SCPI command tables
-  analysis/                spectrum, math, cursors, measurements
-  decode/                  UART / SPI / I2C / CAN protocol decoders
-  storage/                 CSV, JSON, XLSX, PNG, PDF export
-  settings/                bench configuration
-  app/                     io_worker - single instrument owner
-tools/                     diagnostics, calibration helper
-tests/                     427-test headless suite
-doc/                       ARCHITECTURE.md, SCPI_COVERAGE.md
-```
+The hardware sets a ceiling on what's possible:
 
----
-
-## USB interface notes
-
-Verified on HDS271 firmware V1.3.0. The instrument is VID 0x5345 / PID 0x1234, composite:
-
-| Interface | Class | Endpoints | Role |
-|---|---|---|---|
-| 0 | HID (0x03) | 0x81 IN / 0x01 OUT interrupt, 64-byte reports | ASCII SCPI |
-| 1 | Mass storage (0x08) | 0x82 IN / 0x02 OUT bulk | 8 MB volume — unused |
-
-Key facts learned on hardware:
-
-- **Samples wrap at 255.** The offset can push a signal across the 0/255 boundary; the decoder un-wraps before converting to volts.
-- **Volts/div label is cosmetic.** Calibration pins decoded extremes to the instrument's own MIN/MAX/Vpp readings.
-- **Volts/div and vertical position cannot be written over USB.** Both are accepted and ignored. The timebase write is live.
-- **AUTO key is not reachable over USB.** Nine candidates were probed; none changed any setting. The AUTO button frames the time axis from the measured frequency.
-- **300 samples per frame** via :DATa:WAVe:SCReen:CH1? at ~1.5 fps. Deep-memory download is silent on this firmware.
+- ~1.5 fps live capture (USB HID floor — 300 samples per frame over a 64-byte endpoint)
+- 8-bit vertical resolution
+- No AWG/signal generator on the HDS271
+- Hardware AUTO and trigger force not reachable over USB — both are implemented in software
