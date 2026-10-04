@@ -460,18 +460,21 @@ class ViewsMixin:
         )
 
         if fast_path:
-            # Remove only the dynamic artists added last frame: traces, trigger
-            # cursor, zero markers, cursor markers (refresh_marker_lines adds more).
-            for artist in getattr(self, "_dynamic_artists", []):
-                try:
-                    artist.remove()
-                except Exception:
-                    pass
-            self._dynamic_artists = []
-            # Re-draw the traces onto the existing axes.
-            for _name, color, x, y in per_channel_xy:
-                line, = self.ax.plot(x, y, color=color, linewidth=1.4)
-                self._dynamic_artists.append(line)
+            # Update the existing Line2D objects in-place via set_data().
+            # This avoids any add/remove of artists which marks the axes stale
+            # and triggers matplotlib's autoscale, overriding the ylim set by
+            # show_graticule().
+            lines = getattr(self, "_dynamic_artists", [])
+            for i, (_name, color, x, y) in enumerate(per_channel_xy):
+                if i < len(lines):
+                    lines[i].set_data(x, y)
+                else:
+                    # More channels than last frame — append a new line.
+                    line, = self.ax.plot(x, y, color=color, linewidth=1.4)
+                    lines.append(line)
+            # Hide any leftover lines from a previous frame with more channels.
+            for j in range(len(per_channel_xy), len(lines)):
+                lines[j].set_visible(False)
         else:
             # Slow path: full clear + graticule redraw.
             self.ax.clear()
@@ -494,6 +497,9 @@ class ViewsMixin:
                     _nm, _col, mx, my = per_channel_xy[0]
                     self.draw_mask(mx, my)
                 self.show_graticule(framing, window, unit, factor)
+                # Freeze the axes limits set by show_graticule so matplotlib's
+                # draw_idle() cannot re-run autoscale and override them.
+                self.ax.autoscale(False)
                 # Apply zoom limits if the user has dragged a rectangle.
                 xlim = getattr(self, "_zoom_xlim", None)
                 ylim = getattr(self, "_zoom_ylim", None)
