@@ -5,9 +5,9 @@ __pycache__/
 *.swp
 *.env
 
-# Bench settings: the instrument's serial and the calibration for it.
-# Machine-specific, so not source - copy it between benches by hand.
+# Bench settings: machine-specific, copy between benches by hand.
 scope_setup.json
+scope_setup_presets.json
 
 # VS Code
 .vscode/
@@ -25,9 +25,10 @@ waveform_debug_*.bin
 # Jupyter Notebooks
 *.ipynb
 
-# Other
+# Logs
 *.log
-
 *.bak*
-*.pyc
-__pycache__/
+
+# PyInstaller build artefacts
+build/
+dist/

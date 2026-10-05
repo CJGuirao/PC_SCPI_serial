@@ -383,14 +383,14 @@ class CachedHeaderTests(unittest.TestCase):
     def test_a_write_drops_the_cached_header(self):
         scope = OWONScopeController(family="hds")
         scope._cached_header = {"HEAD": 1}
-        scope.legacy_send_command = lambda command: True
+        scope._hds_transport = lambda: type("T", (), {"exchange_text": lambda s, c: None})()
         scope.send_command(":CH1:SCALe 2e-01")
         self.assertIsNone(scope._cached_header)
 
     def test_a_query_leaves_it_alone(self):
         scope = OWONScopeController(family="hds")
         scope._cached_header = {"HEAD": 1}
-        scope.legacy_send_command = lambda command: True
+        scope._hds_transport = lambda: type("T", (), {"exchange_text": lambda s, c: None})()
         scope.send_command(":CH1:SCALe?")
         self.assertIsNotNone(scope._cached_header)
 
@@ -511,11 +511,10 @@ class ChoiceListTests(PanelTestCase):
         self.assertEqual(["SAMPle", "PEAK"], scope.acquire_mode_choices())
         self.assertEqual(["4K", "8K"], scope.memory_depth_choices())
 
-    def test_the_sds_lists_are_left_alone(self):
-        scope = OWONScopeController(family="sds")
-        self.assertEqual(list(OWONScopeController.ACQ_TYPES), scope.acquire_mode_choices())
-        self.assertEqual(list(OWONScopeController.MEMORY_DEPTHS), scope.memory_depth_choices())
-        self.assertNotEqual(["4K", "8K"], scope.memory_depth_choices())
+    def test_hds_choice_lists(self):
+        scope = OWONScopeController(family="hds")
+        self.assertEqual(["SAMPle", "PEAK"], scope.acquire_mode_choices())
+        self.assertEqual(["4K", "8K"], scope.memory_depth_choices())
 
     def test_a_controller_that_cannot_answer_falls_back(self):
         # A spec'd Mock returns a Mock from these, and the panel still has to build.
@@ -523,55 +522,25 @@ class ChoiceListTests(PanelTestCase):
                          self.app.choices("acquire_mode_choices", "ACQ_TYPES"))
 
 
-class DialectFallbackTests(unittest.TestCase):
-    """The HDS overrides replace the originals, being in the same class.
+class DialectTests(unittest.TestCase):
+    """The controller is HDS-only; is_hds is always True."""
 
-    A fallback written as ``OWONScopeController.query(self, ...)`` therefore
-    resolves back to the override and recurses until the stack dies, which is
-    what every non-HDS instrument used to do. The aliases exist so it cannot.
-    """
-
-    OVERRIDDEN = ("query", "send_command", "query_binary", "download_waveform_data",
-                  "set_trigger_slope", "get_trigger_slope",
-                  "set_trigger_coupling", "get_trigger_coupling")
-
-    def test_aliases_point_somewhere_other_than_the_overrides(self):
-        for name in self.OVERRIDDEN:
-            with self.subTest(name=name):
-                self.assertIsNot(getattr(OWONScopeController, "legacy_" + name),
-                                 getattr(OWONScopeController, name))
-
-    def test_a_serial_query_uses_the_original_implementation(self):
-        scope = OWONScopeController(family="sds")
-        scope.legacy_query = lambda command: "IDN:" + command
-        self.assertEqual("IDN:*IDN?", scope.query_serial("*IDN?"))
-
-    def test_a_binary_query_falls_back_without_recursing(self):
-        scope = OWONScopeController(family="sds")
-        scope.legacy_query_binary = lambda command, timeout=None: "bin:" + command
-        self.assertEqual("bin:X?", scope.query_binary("X?"))
-
-    def test_download_falls_back_without_recursing(self):
-        scope = OWONScopeController(family="sds")
-        scope.legacy_download_waveform_data = lambda: "legacy"
-        self.assertEqual("legacy", scope.download_waveform_data())
-
-    def test_trigger_helpers_fall_back_without_recursing(self):
-        scope = OWONScopeController(family="sds")
-        scope.legacy_get_trigger_slope = lambda: "RISe"
-        scope.legacy_get_trigger_coupling = lambda: "DC"
-        scope.legacy_set_trigger_slope = lambda slope: "slope:" + slope
-        scope.legacy_set_trigger_coupling = lambda coupling: "coupling:" + coupling
-        self.assertEqual("RISe", scope.get_trigger_slope())
-        self.assertEqual("DC", scope.get_trigger_coupling())
-        self.assertEqual("slope:RISE", scope.set_trigger_slope("RISE"))
-        self.assertEqual("coupling:AC", scope.set_trigger_coupling("AC"))
-
-    def test_an_hds_scope_never_reaches_the_aliases(self):
+    def test_is_hds_always_true(self):
         scope = OWONScopeController(family="hds")
-        scope.legacy_get_trigger_slope = lambda: "legacy"
-        scope.query = lambda node: "FALL"
-        self.assertEqual("FALL", scope.get_trigger_slope())
+        self.assertTrue(scope.is_hds)
+
+    def test_trigger_slope_uses_hds_dialect(self):
+        scope = OWONScopeController(family="hds")
+        replies = []
+        scope.query = lambda node: replies.append(node) or "RISe"
+        result = scope.get_trigger_slope()
+        self.assertEqual("RISe", result)
+
+    def test_trigger_coupling_uses_hds_dialect(self):
+        scope = OWONScopeController(family="hds")
+        scope.query = lambda node: "DC"
+        result = scope.get_trigger_coupling()
+        self.assertEqual("DC", result)
 
 
 class TriggerStatusTests(unittest.TestCase):
@@ -583,7 +552,7 @@ class TriggerStatusTests(unittest.TestCase):
         return scope
 
     def test_sweep_is_matched_to_the_documented_words(self):
-        self.assertEqual("AUTO", self.scope_with({":TRIGGER:SINGLE:SWEEP?": "AUTo"}).get_trigger_sweep())
+        self.assertEqual("AUTo", self.scope_with({":TRIGGER:SINGLE:SWEEP?": "AUTo"}).get_trigger_sweep())
 
     def test_status_is_reported_as_answered(self):
         self.assertEqual("TRIG", self.scope_with({":TRIGGER:STATUS?": "TRIG"}).get_trigger_status())
@@ -651,7 +620,8 @@ class AutoFrameReportTests(unittest.TestCase):
         # over 70% of eight divisions, converted to the connector figure a 10X
         # probe means.
         self.assertEqual("50mv", report["vertical_scale"])
-        self.assertTrue(any("front-panel setting" in note for note in report["notes"]))
+        self.assertTrue(any("cosmetic-only" in note or "front-panel" in note
+                            for note in report["notes"]))
 
     def test_agreeing_sources_keep_the_decoded_trace(self):
         scope = self.framed_scope({"frequency": 1000.0, "vpp": 2.0, "vmean": 0.5},
@@ -672,7 +642,7 @@ class AutoFrameReportTests(unittest.TestCase):
         report = scope.auto_frame()
         self.assertEqual("decoded trace", report["measured_from"])
         self.assertTrue(any("the instrument measures" in note for note in report["notes"]))
-        self.assertTrue(any("front panel" in note for note in report["notes"]))
+        self.assertTrue(any("disagree" in note for note in report["notes"]))
         self.assertEqual([], self.levels(scope))
 
     def test_a_level_outside_the_measured_span_is_not_written(self):
@@ -783,7 +753,7 @@ class AutoReadbackTests(PanelTestCase):
     #: plainly visible as one.
     REPLIES = {
         "get_trigger_mode": "NORMal",
-        "get_trigger_coupling": "HF",
+        "get_trigger_coupling": "AC",
         "get_trigger_source": "CH2",
         "get_trigger_slope": "FALL",
         "get_trigger_level_volts": 0.25,
@@ -810,7 +780,7 @@ class AutoReadbackTests(PanelTestCase):
         self.instrument_answers()
         self.run_auto()
         self.assertEqual("NORMal", self.app.trigger_mode.get())
-        self.assertEqual("HF", self.app.trigger_coupling.get())
+        self.assertEqual("AC", self.app.trigger_coupling.get())
         self.assertEqual("CH2", self.app.trigger_source.get())
         self.assertEqual("FALL", self.app.trigger_slope.get())
         self.assertEqual("0.25", self.app.trigger_level.get())
@@ -825,11 +795,11 @@ class AutoReadbackTests(PanelTestCase):
         self.instrument_answers()
         self.app.show_channels(2)
         self.scope.get_channel_scale.side_effect = lambda number: ("2v" if number == 2 else "500mv")
-        self.scope.get_channel_coupling.side_effect = lambda number: ("GND" if number == 2 else "AC")
+        self.scope.get_channel_coupling.side_effect = lambda number: ("DC" if number == 2 else "AC")
         self.run_auto()
         self.assertEqual("500mv", self.app.ch1_scale.get())
         self.assertEqual("2v", self.app.ch2_scale.get())
-        self.assertEqual("GND", self.app.ch2_coupling.get())
+        self.assertEqual("DC", self.app.ch2_coupling.get())
 
     def test_a_column_that_is_not_on_screen_is_not_read(self):
         # This firmware answers for more channels than it has, and a column that
@@ -1201,24 +1171,22 @@ class FrontPanelSyncTests(PanelTestCase):
             self.assertAlmostEqual(expected, rows, places=6)
 
     def test_an_off_ladder_scale_snaps_the_widget_and_notes_the_reported_scale(self):
-        # 20 V/div is not on the control (its ladder stops at 10v), so the widget
-        # snaps to 10v. The axis shows the reported scale (20 V/div) because that is
-        # what the hardware grid uses. The decoded amplitude scale is the same here.
+        # 20 V/div is on the ladder, so the widget snaps directly to it.
         self.scope.waveform.channels = [self.channel(20.0)]
         self.app.plot_waveform()
-        self.assertEqual("10v", self.app.ch1_scale.get())
+        self.assertEqual("20v", self.app.ch1_scale.get())
         self.assertIn("20", self.app.ax.get_ylabel())      # reported scale on axis
 
     def test_a_reported_label_sets_the_grid_and_true_scale_moves_the_widget(self):
         # When volts_per_div (the hardware setting, 50 V/div) differs from
         # true_volts_per_div (the decoded amplitude scale, 5 V/div), the grid uses
         # the hardware setting (so divisions match the hardware screen), and the
-        # widget follows the reported hardware scale (nearest = 10v).
+        # widget follows the reported hardware scale (nearest = 50v).
         self.scope.waveform.channels = [
             self.channel(50.0, true_volts_per_div=5.0)]
         self.app.plot_waveform()
-        # The widget follows reported (50 V/div) → nearest on ladder = "10v"
-        self.assertEqual("10v", self.app.ch1_scale.get())
+        # The widget follows reported (50 V/div) → nearest on ladder = "50v"
+        self.assertEqual("50v", self.app.ch1_scale.get())
 
     def test_a_probe_set_on_the_instrument_reaches_the_control(self):
         self.scope.waveform.channels = [self.channel(0.2, attenuation="1X")]

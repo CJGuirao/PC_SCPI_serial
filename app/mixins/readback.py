@@ -1,6 +1,6 @@
 """Readback: panel state, instrument state, trigger rows and measurements."""
 
-from owon_controller import OWONScopeController
+from modernlab.instrument.controller import OWONScopeController
 from modernlab import analysis
 import tkinter as tk
 

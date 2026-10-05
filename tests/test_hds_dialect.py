@@ -34,12 +34,12 @@ class ChannelDialectTests(unittest.TestCase):
         self.assertIn(":CH1:PROBe 10X", scope.sent)
         self.assertIn(":CH1:OFFSet 0", scope.sent)
 
-    def test_sds_channel_commands_keep_the_long_node(self):
-        scope = FakeScope("sds")
+    def test_hds_channel_commands_use_short_node(self):
+        scope = FakeScope("hds")
         scope.set_channel_scale(1, "5v")
         scope.set_channel_coupling(1, "AC")
-        self.assertIn(":CHANnel1:SCALe 5v", scope.sent)
-        self.assertIn(":CHANnel1:COUPling AC", scope.sent)
+        self.assertIn(":CH1:SCALe 5v", scope.sent)
+        self.assertIn(":CH1:COUPling AC", scope.sent)
 
 
 class ReplyNormalisationTests(unittest.TestCase):
@@ -49,13 +49,13 @@ class ReplyNormalisationTests(unittest.TestCase):
             ":CH1:COUPling?": "AC",
             ":HORIzontal:SCALe?": "5e-04",
             ":TRIGger:SINGle:SWEEp?": "AUTo",
-            ":ACQuire:MODE?": "SAMPle",
+            ":ACQuire:MODe?": "SAMPle",
             ":ACQuire:DEPMem?": "4K",
         })
         self.assertEqual(scope.get_channel_scale(1), "5v")
         self.assertEqual(scope.get_channel_coupling(1), "AC")
         self.assertEqual(scope.get_timebase_scale(), "500us")
-        self.assertEqual(scope.get_trigger_mode(), "AUTO")
+        self.assertEqual(scope.get_trigger_mode(), "AUTo")
         self.assertEqual(scope.get_acquire_type(), "SAMPle")
         self.assertEqual(scope.get_memory_depth(), "4K")
         self.assertIn("4K", scope.MEMORY_DEPTHS)
@@ -74,7 +74,7 @@ class ReplyNormalisationTests(unittest.TestCase):
         self.assertEqual(scope.match_scale("5e-04", scope.TIMEBASE_SCALES), "500us")
         self.assertEqual(scope.match_scale("1e-03", scope.TIMEBASE_SCALES), "1ms")
         self.assertIsNone(scope.match_scale("7e-07", scope.TIMEBASE_SCALES))
-        self.assertEqual(scope.match_choice("AUTo", scope.TRIGGER_MODES), "AUTO")
+        self.assertEqual(scope.match_choice("AUTo", scope.TRIGGER_MODES), "AUTo")
         self.assertIsNone(scope.match_choice("", scope.TRIGGER_MODES))
 
 
@@ -104,19 +104,10 @@ class ConnectRoutingTests(unittest.TestCase):
         self.assertTrue(scope.connect_usb("auto"))
         self.assertEqual(calls, ["hid", "identify"])
 
-    def test_explicit_com_port_on_hds_stays_serial(self):
+    def test_hid_failure_returns_false(self):
         scope = OWONScopeController(family="hds")
-        calls = []
-        scope.connect_usb_serial = lambda port, baudrate=115200: calls.append(("serial", port)) or True
-        self.assertTrue(scope.connect_usb("COM7", 115200))
-        self.assertEqual(calls, [("serial", "COM7")])
-
-    def test_auto_usb_on_sds_stays_serial(self):
-        scope = OWONScopeController(family="sds")
-        calls = []
-        scope.connect_usb_serial = lambda port, baudrate=115200: calls.append(("serial", port)) or True
-        self.assertTrue(scope.connect_usb("auto"))
-        self.assertEqual(calls, [("serial", "auto")])
+        scope.connect_usb_hid = lambda serial=None, timeout=2.0: False
+        self.assertFalse(scope.connect_usb("auto"))
 
 
 if __name__ == "__main__":

@@ -101,17 +101,36 @@ def match_choice(reply, choices):
 class HdsDialect:
     """The HDS command nodes and the reply shapes, mixed onto the controller.
 
-    Nothing here is a fallback: where the SDS dialect answers these questions
-    differently the controller routes on the family and calls one base or the
-    other, so no definition shadows another and no alias is needed to keep a
-    fallback out of a loop.
+    This is the only dialect — HDS200/300 series, USB HID only.
     """
 
+    # ── Instrument constants ──────────────────────────────────────────────────
 
-    #: The depth ladder the HDS block carried as an instance-visible list.  It is
-    #: kept because it is what the panel reads back after a write; the choices the
-    #: panel OFFERS are ``HDS_MEMORY_DEPTHS`` above, which is what the manual says.
-    MEMORY_DEPTHS = ["4K", "1K", "10K", "100K", "1M", "10M"]  # HDS reports 4K
+    TIMEBASE_SCALES = [
+        "5ns", "10ns", "20ns", "50ns", "100ns", "200ns", "500ns",
+        "1us", "2us", "5us", "10us", "20us", "50us", "100us", "200us", "500us",
+        "1ms", "2ms", "5ms", "10ms", "20ms", "50ms", "100ms", "200ms", "500ms",
+        "1s", "2s", "5s", "10s", "20s", "50s", "100s",
+    ]
+    VOLTAGE_SCALES = [
+        "1mv", "2mv", "5mv", "10mv", "20mv", "50mv",
+        "100mv", "200mv", "500mv",
+        "1v", "2v", "5v", "10v", "20v", "50v", "100v",
+    ]
+    COUPLING_MODES = ["DC", "AC"]
+    PROBE_RATIOS = ["X1", "X10"]
+    PROBE_ATTEN = PROBE_RATIOS  # backward-compat alias
+    TRIGGER_SOURCES = ["CH1", "CH2"]
+    TRIGGER_SLOPES = ["RISe", "FALL"]
+    TRIGGER_SWEEPS = ["AUTo", "NORMal", "SINGle"]
+    TRIGGER_MODES = ["AUTo", "NORMal", "SINGle"]
+    TRIGGER_COUPLING_MODES = ["DC", "AC"]
+    TRIGGER_COUPLING = TRIGGER_COUPLING_MODES  # backward-compat alias
+    ACQ_TYPES = ["SAMPle", "PEAK"]
+    AVG_COUNTS = ["4", "8", "16", "32", "64", "128"]
+
+    #: Depth ladder the HDS reports back after a write.
+    MEMORY_DEPTHS = ["4K", "1K", "10K", "100K", "1M", "10M"]
 
     #: The reply-normalising helpers are the module-level functions above; they are
     #: bound here as classmethods so ``scope.parse_scale(...)`` and
@@ -163,7 +182,7 @@ class HdsDialect:
 
     # -- timebase / acquisition --------------------------------------------
     def get_timebase_scale(self):
-        reply = self.query(f"{self._cmd(':HORIzontal:SCALe?', ':TIMebase:SCALe?')}")
+        reply = self.query(f"{':HORIzontal:SCALe?'}")
         return self.match_scale(reply, self.TIMEBASE_SCALES) or reply
 
 
@@ -176,7 +195,7 @@ class HdsDialect:
         return self.match_choice(reply, self.TRIGGER_SOURCES) or reply
 
     def get_acquire_type(self):
-        reply = self.query(f"{self._cmd(':ACQuire:MODE?', ':ACQuire:TYPE?')}")
+        reply = self.query(f"{':ACQuire:MODe?'}")
         return self.match_choice(reply, self.ACQ_TYPES) or reply
 
     def get_memory_depth_choice(self):
@@ -186,7 +205,7 @@ class HdsDialect:
         further down replaced it, so nothing has ever called this.  It is kept
         under its own name, and ``get_memory_depth`` is the one that ran.
         """
-        reply = self.query(f"{self._cmd(':ACQuire:DEPMem?', ':ACQuire:MDEPth?')}")
+        reply = self.query(f"{':ACQuire:DEPMem?'}")
         return self.match_choice(reply, self.MEMORY_DEPTHS) or reply
 
     # -- transport ---------------------------------------------------------
@@ -252,8 +271,6 @@ class HdsDialect:
         deliberately rather than on every connect, because a burst of commands
         the firmware does not implement can reset it off the USB bus.
         """
-        if not self.is_hds:
-            return {}
         probed = dict(getattr(self, "_probed_nodes", {}))
         for name in (names or list(self.dialect)):
             for node in self.dialect[name]:
@@ -273,35 +290,22 @@ class HdsDialect:
     #: ``legacy_*`` spelling they had before the split, when they were aliases
     #: inside the one class; a base cannot reach the *other* base's same-named
     #: method otherwise, because ``self.set_trigger_slope`` here is this method.
-    legacy_set_trigger_slope = None
-    legacy_get_trigger_slope = None
-    legacy_set_trigger_coupling = None
-    legacy_get_trigger_coupling = None
-
     def set_trigger_slope(self, slope):
-        if not self.is_hds:
-            return self.legacy_set_trigger_slope(slope)
         # The scope echoes "RISe"; spell it the way the front panel accepts it.
         token = {"RISE": "RISe", "RISING": "RISe", "FALL": "FALL", "FALLING": "FALL"}.get(
             str(slope).strip().upper(), slope)
         return self.send_command(f"{self.trigger_node('slope')} {token}")
 
     def get_trigger_slope(self):
-        if not self.is_hds:
-            return self.legacy_get_trigger_slope()
         reply = self.query(self.trigger_node("slope") + "?")
         return self.match_choice(reply, self.TRIGGER_SLOPES) or reply
 
     def set_trigger_coupling(self, coupling):
-        if not self.is_hds:
-            return self.legacy_set_trigger_coupling(coupling)
         return self.send_command(f"{self.trigger_node('coupling')} {coupling}")
 
     def get_trigger_coupling(self):
-        if not self.is_hds:
-            return self.legacy_get_trigger_coupling()
         reply = self.query(self.trigger_node("coupling") + "?")
-        return self.match_choice(reply, self.TRIGGER_COUPLING) or reply
+        return self.match_choice(reply, self.TRIGGER_COUPLING_MODES) or reply
 
     def get_trigger_sweep(self):
         """AUTO, NORMal or SINGle: 32 ms, cheaper than reading a whole header."""
@@ -322,8 +326,6 @@ class HdsDialect:
 
     def get_trigger_level_volts(self):
         """Trigger level in volts for the Y-axis cursor, or None."""
-        if not self.is_hds:
-            return None
         reply = self.query(self.trigger_node("level") + "?")
         if reply in (None, ""):
             return None
@@ -331,7 +333,7 @@ class HdsDialect:
 
     def get_horizontal_position_seconds(self):
         """Horizontal position as reported by the instrument, in seconds."""
-        reply = self.query(self._cmd(":HORIzontal:OFFset?", ":TIMebase:HOFFset?"))
+        reply = self.query(":HORIzontal:OFFset?")
         if reply in (None, ""):
             return None
         return self.parse_scale(reply)
@@ -345,3 +347,103 @@ class HdsDialect:
         """
         reply = self.query(":ACQuire:DEPMem?")
         return str(reply).strip() or None if reply else None
+
+    # ── Missing utilities (previously in SdsDialect) ─────────────────────────
+
+    def get_idn(self):
+        """Send *IDN? and return the reply string."""
+        return self.query("*IDN?")
+
+    def disconnect(self):
+        """Close the transport and reset connection state."""
+        conn = getattr(self, "connection", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        self.connection = None
+        self.connection_type = None
+        self.is_connected = False
+
+    def nearest_timebase(self, seconds):
+        """Return the nearest TIMEBASE_SCALES string for a value in seconds.
+
+        Comparison is by ratio (log scale) so 190 us and 210 us both round
+        to 200 us, and the step between rungs is always equal either side.
+        """
+        import math
+        try:
+            value = float(seconds)
+        except (TypeError, ValueError):
+            return None
+        if value <= 0:
+            return None
+        best, best_scale = None, None
+        for scale in self.TIMEBASE_SCALES:
+            parsed = self.parse_scale(scale)
+            if parsed is None or parsed <= 0:
+                continue
+            ratio_err = abs(math.log(parsed / value))
+            if best is None or ratio_err < best:
+                best = ratio_err
+                best_scale = scale
+        return best_scale
+
+    def nearest_voltage_scale(self, volts):
+        """Return the nearest voltage scale string for a voltage in volts."""
+        if not volts or volts <= 0:
+            return None
+        best, best_scale = None, None
+        for scale in self.VOLTAGE_SCALES:
+            parsed = self.parse_scale(scale)
+            if parsed is None or parsed <= 0:
+                continue
+            if best is None or abs(parsed - volts) < abs(best - volts):
+                best = parsed
+                best_scale = scale
+        return best_scale
+
+    def set_timebase_scale(self, scale):
+        """Set the timebase scale; invalidates the cached header."""
+        result = self.send_command(f":HORizontal:SCALe {scale}")
+        self.mark_framing_settle()
+        return result
+
+    def get_timebase_offset(self):
+        """Horizontal position in divisions."""
+        reply = self.query(":HORizontal:OFFSet?")
+        return self.parse_scale(reply) if reply else None
+
+    def set_timebase_offset(self, divisions):
+        result = self.send_command(f":HORizontal:OFFSet {divisions}")
+        self.mark_framing_settle()
+        return result
+
+    def set_trigger_level(self, level):
+        return self.send_command(f"{self.trigger_node('level')} {level}")
+
+    set_edge_trigger_level = set_trigger_level  # backward-compat alias
+    set_edge_trigger_coupling = set_trigger_coupling  # backward-compat alias
+
+    def set_trigger_mode(self, mode):
+        return self.send_command(f"{self.trigger_node('sweep')} {mode}")
+
+    def get_trigger_mode(self):
+        reply = self.query(self.trigger_node("sweep") + "?")
+        return self.match_choice(reply, self.TRIGGER_MODES) or reply
+
+    def set_trigger_source(self, source):
+        return self.send_command(f"{self.trigger_node('source')} {source}")
+
+    def get_trigger_source(self):
+        reply = self.query(self.trigger_node("source") + "?")
+        return self.match_choice(reply, self.TRIGGER_SOURCES) or reply
+
+    def get_acquire_type(self):
+        reply = self.query(":ACQuire:MODe?")
+        return self.match_choice(reply, self.ACQ_TYPES) or reply
+
+    def detect_usb_port(self):
+        """Not used on HDS (USB HID only)."""
+        return None

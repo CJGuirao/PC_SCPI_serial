@@ -752,40 +752,6 @@ class ViewsMixin:
         self._avg_buf = {}
         self.log("Averaging buffer cleared.")
 
-    def averaged_channel_xy(self, channels, factor):
-        """Return per_channel_xy with the waveform arrays averaged over the ring buffer.
-
-        When _avg_depth == 1 (off) this is a no-op and returns the live arrays
-        unchanged.  Otherwise it accumulates the last N arrays per channel name
-        and returns the element-wise mean, which suppresses uncorrelated noise by
-        sqrt(N) exactly as hardware averaging would.
-        """
-        from collections import deque
-        depth = getattr(self, "_avg_depth", 1)
-        buf = getattr(self, "_avg_buf", {})
-        result = []
-        for channel in channels:
-            name = str(channel.get("name", "CH1")).upper()
-            y = np.asarray(channel.get("waveform", []), dtype=float)
-            if y.size == 0:
-                result.append((name, channel))
-                continue
-            number = self.channel_number(channel)
-            if number:
-                y = y * self.display_ratio(number, channel)
-                y = y + self.display_offset(number)
-            x = np.arange(y.size, dtype=float) * float(
-                channel.get("point_interval", 1.0) or 1.0) * factor
-            if depth > 1:
-                if name not in buf:
-                    buf[name] = deque(maxlen=depth)
-                buf[name].append(y)
-                if len(buf[name]) > 1:
-                    y = np.mean(np.stack(list(buf[name])), axis=0)
-            result.append((name, x, y))
-        self._avg_buf = buf
-        return result
-
     # ------------------------------------------------------------------
     # Reference trace overlay
     def save_ref_trace(self):

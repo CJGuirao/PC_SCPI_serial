@@ -2,7 +2,7 @@
 
 from modernlab.instrument.capture.waveform import HDS_HORIZONTAL_DIVISIONS
 from modernlab.instrument.capture.waveform import HDS_VERTICAL_DIVISIONS
-from owon_controller import OWONScopeController
+from modernlab.instrument.controller import OWONScopeController
 from modernlab.instrument.capture.waveform import WaveformData
 import numpy as np
 

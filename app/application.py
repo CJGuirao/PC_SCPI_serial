@@ -24,7 +24,7 @@ import os
 
 from modernlab import analysis
 from modernlab.storage import export
-from owon_controller import OWONScopeController
+from modernlab.instrument.controller import OWONScopeController
 from modernlab.settings.bench import ScopeSetup, attached_scopes
 from modernlab.instrument.capture.waveform import HDS_HORIZONTAL_DIVISIONS, HDS_VERTICAL_DIVISIONS, WaveformData
 
